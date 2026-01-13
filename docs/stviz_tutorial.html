@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>stviz Workflow Tutorial</title>
+  <style>
+    :root {
+      --bg: #f4f7fb;
+      --bg-2: #fff4e8;
+      --ink: #1b1f2a;
+      --muted: #4d5563;
+      --accent: #2b6d7b;
+      --accent-2: #f08b3e;
+      --accent-3: #364b8a;
+      --card: #ffffff;
+      --line: #d6dee6;
+      --shadow: 0 22px 50px rgba(12, 22, 32, 0.14);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(900px 400px at 10% 0%, rgba(43, 109, 123, 0.18), transparent 60%),
+        radial-gradient(900px 480px at 90% 20%, rgba(240, 139, 62, 0.18), transparent 60%),
+        linear-gradient(180deg, var(--bg), var(--bg-2));
+      font-family: "Instrument Sans", "Archivo", "Work Sans", "Noto Sans", sans-serif;
+      line-height: 1.6;
+    }
+
+    header {
+      padding: 60px 22px 18px;
+    }
+
+    .wrap {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .hero {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 28px;
+      padding: 32px;
+      box-shadow: var(--shadow);
+    }
+
+    h1 {
+      font-family: "Merriweather", "Source Serif 4", "Spectral", serif;
+      font-size: clamp(2.2rem, 3.4vw, 3.3rem);
+      margin: 0 0 8px;
+    }
+
+    h2 {
+      font-family: "Merriweather", "Source Serif 4", "Spectral", serif;
+      margin: 28px 0 10px;
+      font-size: clamp(1.5rem, 2.1vw, 2rem);
+    }
+
+    h3 {
+      margin: 18px 0 6px;
+      font-size: 1.1rem;
+    }
+
+    main {
+      padding: 10px 22px 80px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 18px 20px;
+      box-shadow: 0 12px 24px rgba(12, 22, 32, 0.08);
+    }
+
+    .step {
+      border-left: 6px solid var(--accent);
+      padding-left: 16px;
+      margin: 18px 0 28px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 16px;
+    }
+
+    code, pre {
+      font-family: "JetBrains Mono", "Fira Code", "Menlo", "Consolas", monospace;
+      font-size: 0.92rem;
+    }
+
+    pre {
+      background: #121a22;
+      color: #eef3f9;
+      padding: 16px;
+      border-radius: 14px;
+      overflow-x: auto;
+    }
+
+    .shot {
+      border: 2px dashed #9fb2c4;
+      border-radius: 18px;
+      padding: 26px;
+      background: linear-gradient(135deg, rgba(43, 109, 123, 0.12), rgba(240, 139, 62, 0.12));
+      min-height: 170px;
+      display: grid;
+      place-items: center;
+      font-weight: 600;
+      color: #3a4a55;
+      text-align: center;
+    }
+
+    .shot::before {
+      content: attr(data-label);
+    }
+
+    .tag {
+      display: inline-block;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: #f2f6ff;
+      border: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.86rem;
+      margin-right: 6px;
+    }
+
+    footer {
+      padding: 22px;
+      border-top: 1px solid var(--line);
+      text-align: center;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.4);
+    }
+
+    @media (max-width: 720px) {
+      header {
+        padding-top: 46px;
+      }
+      .hero {
+        padding: 24px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="wrap hero">
+      <h1>stviz Workflow Tutorial</h1>
+      <p>A step-by-step walkthrough to generate data, export to .stviz, explore transitions, and create an exportable loop. This tutorial assumes you are running in the repository root.</p>
+      <div>
+        <span class="tag">Estimated time: 20-30 minutes</span>
+        <span class="tag">Output: .stviz + PNG frames + optional video</span>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <div class="wrap">
+      <section class="card">
+        <h2>Before you start</h2>
+        <div class="grid">
+          <div>
+            <h3>Install dependencies</h3>
+            <pre><code>python -m pip install -U anndata h5py numpy pandas scipy</code></pre>
+            <pre><code>cargo --version</code></pre>
+          </div>
+          <div>
+            <h3>Linux only</h3>
+            <pre><code>sudo apt-get update
+sudo apt-get install -y libgtk-3-dev</code></pre>
+            <p>GTK is required for the file dialog in the viewer.</p>
+          </div>
+        </div>
+      </section>
+
+      <section class="step">
+        <h2>Step 1 - Create a mock dataset (optional)</h2>
+        <p>If you already have a .h5ad file, you can skip this step.</p>
+        <pre><code>python python/mock_spatial_dataset.py --out data/mock_spatial_10k.h5ad</code></pre>
+        <div class="shot" data-label="Screenshot placeholder: mock dataset log output"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 2 - Export to .stviz</h2>
+        <p>Run the exporter to create a .stviz file. Use <code>--include-expr</code> if you want gene coloring.</p>
+        <pre><code>python python/export_stviz.py --input data/mock_spatial_10k.h5ad --output data/mock_spatial_10k.stviz --include-expr</code></pre>
+        <div class="shot" data-label="Screenshot placeholder: exporter completion output"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 3 - Build and launch the viewer</h2>
+        <pre><code>cargo run --release</code></pre>
+        <div class="shot" data-label="Screenshot placeholder: stviz startup window"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 4 - Load the dataset</h2>
+        <ol>
+          <li>Click <strong>Open .stviz</strong> and select the file.</li>
+          <li>Confirm the point count and dataset path show in the left panel.</li>
+          <li>Use <strong>Fit view to FROM</strong> if the points are off-screen.</li>
+        </ol>
+        <div class="shot" data-label="Screenshot placeholder: dataset loaded with stats"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 5 - Configure the transition</h2>
+        <ol>
+          <li>In the timeline bar, set <strong>Mode</strong> to Single.</li>
+          <li>Choose a FROM space like <code>spatial</code> and a TO space like <code>X_umap</code>.</li>
+          <li>Press Play or hit Spacebar to preview.</li>
+        </ol>
+        <div class="shot" data-label="Screenshot placeholder: transition playback"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 6 - Color and filter</h2>
+        <ol>
+          <li>Set color mode to <strong>Categorical</strong> and pick <code>cluster</code>.</li>
+          <li>Toggle categories and click <strong>Apply filter</strong>.</li>
+          <li>Switch to <strong>Continuous</strong> and select <code>score</code> to see the legend.</li>
+        </ol>
+        <div class="shot" data-label="Screenshot placeholder: category filter list"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 7 - Build a path with keyframes</h2>
+        <ol>
+          <li>Switch timeline <strong>Mode</strong> to Path.</li>
+          <li>Click <strong>Add key</strong> to insert a middle space.</li>
+          <li>Assign a different color key for each keyframe.</li>
+        </ol>
+        <div class="shot" data-label="Screenshot placeholder: path timeline with keyframes"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 8 - Explore sample grid mode</h2>
+        <ol>
+          <li>Enable <strong>Sample grid</strong>.</li>
+          <li>Choose <code>sample</code> as the grouping field.</li>
+          <li>Adjust padding to create visual separation.</li>
+        </ol>
+        <div class="shot" data-label="Screenshot placeholder: grid layout"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 9 - Gene coloring</h2>
+        <ol>
+          <li>Select <strong>Gene</strong> mode.</li>
+          <li>Type a gene name from your dataset and click <strong>Apply gene</strong>.</li>
+          <li>Confirm the legend updates with the expression range.</li>
+        </ol>
+        <div class="shot" data-label="Screenshot placeholder: gene coloring legend"></div>
+      </section>
+
+      <section class="step">
+        <h2>Step 10 - Export the result</h2>
+        <div class="grid">
+          <div>
+            <h3>Screenshot</h3>
+            <p>Click <strong>Screenshot</strong> to save the viewport as PNG.</p>
+          </div>
+          <div>
+            <h3>Loop export</h3>
+            <p>Set FPS and output name, then click <strong>Export loop video</strong>.</p>
+            <p>Frames are written to <code>output/loop_&lt;timestamp&gt;</code>.</p>
+          </div>
+        </div>
+        <div class="shot" data-label="Screenshot placeholder: export status and output directory"></div>
+      </section>
+
+      <section class="card">
+        <h2>Next steps</h2>
+        <ul>
+          <li>Experiment with different easing curves and playback modes.</li>
+          <li>Try larger datasets and adjust Max draw for performance.</li>
+          <li>Customize palettes by exporting <code>adata.uns["&lt;col&gt;_colors"]</code>.</li>
+          <li>Use the exporter on real datasets to build presentation videos.</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="wrap">stviz tutorial - replace screenshot placeholders with real captures as needed.</div>
+  </footer>
+</body>
+</html>

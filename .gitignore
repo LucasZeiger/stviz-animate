@@ -1,0 +1,12 @@
+/target
+/output
+/data
+/frames
+*.stviz
+*.h5ad
+*.png
+*.mp4
+*.log
+*.tmp
+*.swp
+*.swo
