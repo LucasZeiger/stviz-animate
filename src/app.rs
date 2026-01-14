@@ -7,7 +7,7 @@ use crate::{
 use anyhow::Context as _;
 use eframe::egui;
 use egui_wgpu::{wgpu, CallbackTrait};
-use rand::seq::SliceRandom;
+use rand::{seq::SliceRandom, Rng};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -28,7 +28,6 @@ pub struct StvizApp {
 
     from_space: usize,
     to_space: usize,
-    transition_mode: TransitionMode,
     space_path: Vec<usize>,
 
     // Color mode
@@ -84,18 +83,22 @@ pub struct StvizApp {
     export_status: Option<String>,
     export_run_ffmpeg: bool,
     export_camera: Option<Camera2D>,
+    ffmpeg_available: bool,
 
     // .h5ad -> .stviz conversion
-    convert_python_cmd: String,
-    convert_include_expr: bool,
     convert_generate_only: bool,
     convert_input: String,
     convert_output: String,
     convert_status: Option<String>,
     convert_running: bool,
     convert_handle: Option<std::thread::JoinHandle<Result<ConvertResult, String>>>,
-    convert_last_python_cmd: Option<String>,
     convert_last_python_exe: Option<String>,
+    convert_log_path: Option<PathBuf>,
+    convert_log_text: String,
+    mock_cells: u32,
+    mock_last_h5ad: Option<PathBuf>,
+    mock_last_stviz: Option<PathBuf>,
+    mock_last_log: Option<PathBuf>,
 
     // UI/view settings
     ui_scale: f32,
@@ -142,12 +145,6 @@ enum ColorKey {
     Categorical(usize),
     Continuous(usize),
     Gene(String),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TransitionMode {
-    Single,
-    Path,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -220,6 +217,7 @@ struct ConvertResult {
     msg: String,
     output: PathBuf,
     load_after: bool,
+    python_exe: Option<String>,
 }
 
 impl StvizApp {
@@ -241,6 +239,7 @@ impl StvizApp {
         let project_dir = Self::resolve_project_dir();
         let output_dir = project_dir.join("output");
         let _ = std::fs::create_dir_all(&output_dir);
+        Self::cleanup_mock_artifacts(&output_dir);
 
         Self {
             dataset: None,
@@ -251,7 +250,6 @@ impl StvizApp {
 
             from_space: 0,
             to_space: 0,
-            transition_mode: TransitionMode::Single,
             space_path: Vec::new(),
 
             color_mode: ColorMode::Categorical,
@@ -301,17 +299,21 @@ impl StvizApp {
             export_status: None,
             export_run_ffmpeg: true,
             export_camera: None,
+            ffmpeg_available: Command::new("ffmpeg").arg("-version").output().is_ok(),
 
-            convert_python_cmd: String::new(),
-            convert_include_expr: false,
             convert_generate_only: false,
             convert_input: String::new(),
             convert_output: String::new(),
             convert_status: None,
             convert_running: false,
             convert_handle: None,
-            convert_last_python_cmd: None,
             convert_last_python_exe: None,
+            convert_log_path: None,
+            convert_log_text: String::new(),
+            mock_cells: 500_000,
+            mock_last_h5ad: None,
+            mock_last_stviz: None,
+            mock_last_log: None,
 
             ui_scale: 1.0,
             ui_theme: UiTheme::Dark,
@@ -367,7 +369,6 @@ impl StvizApp {
         self.to_space = (ds.meta.spaces.len().saturating_sub(1)).min(1);
         self.active_obs_idx = 0;
         self.color_mode = ColorMode::Categorical;
-        self.transition_mode = TransitionMode::Single;
         self.space_path.clear();
         if ds.meta.spaces.len() >= 2 {
             self.space_path.push(0);
@@ -698,6 +699,9 @@ impl StvizApp {
         self.convert_running = false;
         match handle.join() {
             Ok(Ok(result)) => {
+                if let Some(python_exe) = result.python_exe {
+                    self.convert_last_python_exe = Some(python_exe);
+                }
                 self.convert_status = Some(result.msg);
                 if result.load_after {
                     if !result.output.exists() {
@@ -723,6 +727,16 @@ impl StvizApp {
             Ok(Err(msg)) => self.convert_status = Some(msg),
             Err(_) => self.convert_status = Some("Conversion thread panicked.".to_string()),
         }
+        self.refresh_convert_log();
+    }
+
+    fn refresh_convert_log(&mut self) {
+        let Some(path) = self.convert_log_path.as_ref() else {
+            return;
+        };
+        if let Ok(text) = std::fs::read_to_string(path) {
+            self.convert_log_text = text;
+        }
     }
 
     fn queue_h5ad_convert(&mut self, path: &Path) {
@@ -731,12 +745,63 @@ impl StvizApp {
         self.start_convert();
     }
 
-    fn detect_python_cmd(override_cmd: &str) -> Result<(String, String), String> {
-        let override_cmd = override_cmd.trim();
-        if !override_cmd.is_empty() {
-            return Self::check_python_cmd(override_cmd);
+    fn clamp_mock_cells(&mut self) -> u32 {
+        let clamped = self.mock_cells.clamp(10_000, 10_000_000);
+        if clamped != self.mock_cells {
+            self.mock_cells = clamped;
         }
+        clamped
+    }
 
+    fn default_mock_paths(&self, cells: u32) -> (PathBuf, PathBuf) {
+        let _ = std::fs::create_dir_all(&self.output_dir);
+        let ts = chrono_like_timestamp();
+        let h5ad = self
+            .output_dir
+            .join(format!("mock_spatial_{cells}_{ts}.h5ad"));
+        let stviz = self
+            .output_dir
+            .join(format!("mock_spatial_{cells}_{ts}.stviz"));
+        (h5ad, stviz)
+    }
+
+    fn cleanup_mock_artifacts(output_dir: &Path) {
+        let Ok(entries) = std::fs::read_dir(output_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name.starts_with("mock_spatial_") || name.starts_with("mock_convert_log_") {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    fn cleanup_previous_mock(&mut self) {
+        if let Some(path) = self.mock_last_h5ad.as_ref() {
+            if path.starts_with(&self.output_dir) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        if let Some(path) = self.mock_last_stviz.as_ref() {
+            if path.starts_with(&self.output_dir) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+        if let Some(path) = self.mock_last_log.as_ref() {
+            if path.starts_with(&self.output_dir) {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
+    fn detect_python_cmd() -> Result<(String, String), String> {
         let mut errors = Vec::new();
         if let Some(env_cmd) = Self::python_from_env() {
             match Self::check_python_cmd(&env_cmd) {
@@ -775,33 +840,7 @@ impl StvizApp {
         let exe = String::from_utf8_lossy(&exe_out.stdout).trim().to_string();
         let exe_label = if exe.is_empty() { cmd.to_string() } else { exe };
 
-        let mut import_cmd = Command::new(cmd);
-        import_cmd
-            .arg("-c")
-            .arg("import anndata, h5py, numpy, pandas, scipy");
-        Self::apply_python_env(&mut import_cmd, env_root.as_deref());
-        let import_out = import_cmd
-            .output()
-            .map_err(|e| format!("Failed to run `{cmd}`: {e}"))?;
-        if import_out.status.success() {
-            return Ok((cmd.to_string(), exe_label));
-        }
-
-        let stderr = String::from_utf8_lossy(&import_out.stderr);
-        let stdout = String::from_utf8_lossy(&import_out.stdout);
-        let detail = if !stderr.trim().is_empty() {
-            stderr.trim().to_string()
-        } else {
-            stdout.trim().to_string()
-        };
-        let detail = if detail.is_empty() {
-            "Missing required modules.".to_string()
-        } else {
-            detail
-        };
-        Err(format!(
-            "`{cmd}` ({exe_label}) is missing required modules.\n{detail}\nInstall with: {cmd} -m pip install -U anndata h5py numpy pandas scipy\nClear the Python field to auto-detect from PATH."
-        ))
+        Ok((cmd.to_string(), exe_label))
     }
 
     fn python_from_env() -> Option<String> {
@@ -830,40 +869,6 @@ impl StvizApp {
             .and_then(|s| s.to_str())
             .unwrap_or("converted");
         self.output_dir.join(format!("{stem}.stviz"))
-    }
-
-    fn python_picker_start_dir() -> Option<PathBuf> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from));
-        let mut candidates = Vec::new();
-
-        if let Some(home_dir) = home.as_ref() {
-            candidates.push(home_dir.join(".virtualenvs"));
-            candidates.push(home_dir.join(".local").join("share").join("virtualenvs"));
-            candidates.push(home_dir.join(".pyenv").join("versions"));
-            candidates.push(home_dir.join(".conda").join("envs"));
-            candidates.push(home_dir.join("miniconda3").join("envs"));
-            candidates.push(home_dir.join("anaconda3").join("envs"));
-            candidates.push(home_dir.join("mambaforge").join("envs"));
-            candidates.push(home_dir.join("micromamba").join("envs"));
-        }
-
-        if let Some(local_app) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-            candidates.push(local_app.join("Programs"));
-            candidates.push(local_app.join("Continuum").join("anaconda3").join("envs"));
-        }
-        if let Some(app_data) = std::env::var_os("APPDATA").map(PathBuf::from) {
-            candidates.push(app_data.join("Python"));
-        }
-
-        for dir in &candidates {
-            if dir.exists() {
-                return Some(dir.to_path_buf());
-            }
-        }
-
-        home
     }
 
     fn resolve_project_dir() -> PathBuf {
@@ -947,6 +952,219 @@ impl StvizApp {
         Some(parent)
     }
 
+    fn venv_python_path(venv_dir: &Path) -> PathBuf {
+        if cfg!(windows) {
+            venv_dir.join("Scripts").join("python.exe")
+        } else {
+            venv_dir.join("bin").join("python")
+        }
+    }
+
+    fn start_mock_dataset(&mut self) {
+        if self.convert_running {
+            return;
+        }
+        self.cleanup_previous_mock();
+        let cells = self.clamp_mock_cells();
+        let (h5ad_path, stviz_path) = self.default_mock_paths(cells);
+        self.mock_last_h5ad = Some(h5ad_path.clone());
+        self.mock_last_stviz = Some(stviz_path.clone());
+        self.convert_input = h5ad_path.display().to_string();
+        self.convert_output = stviz_path.display().to_string();
+
+        let script = self.project_dir.join("python").join("mock_spatial_dataset.py");
+        if !script.exists() {
+            self.convert_status = Some(format!(
+                "Mock dataset script not found: {}",
+                script.display()
+            ));
+            return;
+        }
+
+        let (python_cmd, python_exe) = match Self::detect_python_cmd() {
+            Ok(cmd) => cmd,
+            Err(msg) => {
+                self.convert_status = Some(msg);
+                return;
+            }
+        };
+        self.convert_last_python_exe = Some(python_exe.clone());
+
+        let input = h5ad_path.display().to_string();
+        let output = stviz_path.display().to_string();
+        let script = script.to_string_lossy().to_string();
+        let include_expr = true;
+        let generate_only = self.convert_generate_only;
+        let project_dir = self.project_dir.clone();
+        let log_path = self
+            .output_dir
+            .join(format!("mock_convert_log_{}.txt", chrono_like_timestamp()));
+        let seed: u64 = rand::thread_rng().gen();
+
+        self.convert_running = true;
+        self.convert_log_path = Some(log_path.clone());
+        self.convert_log_text.clear();
+        self.convert_status = Some("Preparing mock dataset...".to_string());
+        self.convert_handle = Some(thread::spawn(move || {
+            let mut log = String::new();
+            let mut append = |line: &str| {
+                log.push_str(line);
+                log.push('\n');
+                let _ = std::fs::write(&log_path, &log);
+            };
+
+            append("Mock dataset generation started.");
+            append(&format!("Requested cells: {cells}"));
+            append("Preparing the converter environment...");
+
+            let venv_dir = project_dir.join(".stviz_venv");
+            let venv_python = Self::venv_python_path(&venv_dir);
+            let base_env_root = Self::python_env_root(&python_cmd);
+            if !venv_python.exists() {
+                append("Creating a private converter environment...");
+                let mut cmd = Command::new(&python_cmd);
+                cmd.arg("-m").arg("venv").arg(&venv_dir);
+                Self::apply_python_env(&mut cmd, base_env_root.as_deref());
+                let out = cmd.output().map_err(|e| {
+                    append("Failed to create the converter environment.");
+                    append(&format!("Details: {e}"));
+                    format!("Failed to create virtual environment: {e}\nLog: {}", log_path.display())
+                })?;
+                if !out.status.success() {
+                    append("Environment setup output:");
+                    append(&String::from_utf8_lossy(&out.stdout));
+                    append("Environment setup error:");
+                    append(&String::from_utf8_lossy(&out.stderr));
+                    return Err(format!(
+                        "Virtual environment setup failed.\nLog: {}",
+                        log_path.display()
+                    ));
+                }
+            } else {
+                append("Converter environment found.");
+            }
+
+            append("Checking converter dependencies...");
+            let mut check_cmd = Command::new(&venv_python);
+            check_cmd
+                .arg("-c")
+                .arg("import anndata, h5py, numpy, pandas, scipy");
+            Self::apply_python_env(&mut check_cmd, Some(&venv_dir));
+            let check_out = check_cmd.output().map_err(|e| {
+                append("Dependency check failed.");
+                append(&format!("Details: {e}"));
+                format!("Failed to check dependencies: {e}\nLog: {}", log_path.display())
+            })?;
+
+            if !check_out.status.success() {
+                append("Installing converter dependencies (this may take a minute)...");
+                let mut pip_cmd = Command::new(&venv_python);
+                pip_cmd
+                    .arg("-m")
+                    .arg("pip")
+                    .arg("install")
+                    .arg("-U")
+                    .arg("anndata")
+                    .arg("h5py")
+                    .arg("numpy")
+                    .arg("pandas")
+                    .arg("scipy");
+                Self::apply_python_env(&mut pip_cmd, Some(&venv_dir));
+                let pip_out = pip_cmd.output().map_err(|e| {
+                    append("Dependency install failed.");
+                    append(&format!("Details: {e}"));
+                    format!("Failed to install dependencies: {e}\nLog: {}", log_path.display())
+                })?;
+                if !pip_out.status.success() {
+                    append("Install output:");
+                    append(&String::from_utf8_lossy(&pip_out.stdout));
+                    append("Install error:");
+                    append(&String::from_utf8_lossy(&pip_out.stderr));
+                    return Err(format!(
+                        "Dependency install failed.\nLog: {}",
+                        log_path.display()
+                    ));
+                }
+                append("Dependencies installed.");
+            } else {
+                append("Dependencies already installed.");
+            }
+
+            append("Generating the mock .h5ad file...");
+            let mut mock_cmd = Command::new(&venv_python);
+            mock_cmd
+                .arg("-X")
+                .arg("faulthandler")
+                .arg(&script)
+                .arg("--out")
+                .arg(&input)
+                .arg("--cells")
+                .arg(cells.to_string())
+                .arg("--seed")
+                .arg(seed.to_string());
+            mock_cmd.env("PYTHONFAULTHANDLER", "1");
+            mock_cmd.current_dir(&project_dir);
+            Self::apply_python_env(&mut mock_cmd, Some(&venv_dir));
+
+            let out = mock_cmd.output().map_err(|e| {
+                append("Mock dataset generation failed to start.");
+                append(&format!("Details: {e}"));
+                format!("Failed to run mock generator: {e}\nLog: {}", log_path.display())
+            })?;
+            if !out.status.success() {
+                append("Mock generation output:");
+                append(&String::from_utf8_lossy(&out.stdout));
+                append("Mock generation error:");
+                append(&String::from_utf8_lossy(&out.stderr));
+                return Err(format!(
+                    "Mock dataset generation failed.\nLog: {}",
+                    log_path.display()
+                ));
+            }
+            append("Mock dataset created.");
+
+            append("Converting dataset...");
+            let mut cmd = Command::new(&venv_python);
+            cmd.arg("-X")
+                .arg("faulthandler")
+                .arg(project_dir.join("python").join("export_stviz.py"))
+                .arg("--input")
+                .arg(&input)
+                .arg("--output")
+                .arg(&output);
+            if include_expr {
+                cmd.arg("--include-expr");
+            }
+            cmd.env("PYTHONFAULTHANDLER", "1");
+            cmd.current_dir(&project_dir);
+            Self::apply_python_env(&mut cmd, Some(&venv_dir));
+
+            let out = cmd.output().map_err(|e| {
+                append("Conversion failed to start.");
+                append(&format!("Details: {e}"));
+                format!("Failed to run exporter: {e}\nLog: {}", log_path.display())
+            })?;
+            if !out.status.success() {
+                append("Conversion output:");
+                append(&String::from_utf8_lossy(&out.stdout));
+                append("Conversion error:");
+                append(&String::from_utf8_lossy(&out.stderr));
+                return Err(format!(
+                    "Conversion failed.\nLog: {}",
+                    log_path.display()
+                ));
+            }
+            append("Conversion completed.");
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            Ok(ConvertResult {
+                msg: format!("Mock dataset ready.\n{}", stdout.trim()),
+                output: PathBuf::from(output),
+                load_after: !generate_only,
+                python_exe: Some(venv_python.display().to_string()),
+            })
+        }));
+    }
+
     fn start_convert(&mut self) {
         if self.convert_running {
             return;
@@ -972,30 +1190,117 @@ impl StvizApp {
             return;
         }
 
-        let (python_cmd, python_exe) = match Self::detect_python_cmd(&self.convert_python_cmd) {
+        let (python_cmd, python_exe) = match Self::detect_python_cmd() {
             Ok(cmd) => cmd,
             Err(msg) => {
                 self.convert_status = Some(msg);
                 return;
             }
         };
-        self.convert_last_python_cmd = Some(python_cmd.clone());
         self.convert_last_python_exe = Some(python_exe.clone());
         let input = input.to_string();
         let output = output.to_string();
         let script = script.to_string_lossy().to_string();
-        let include_expr = self.convert_include_expr;
-        let python_exe_label = python_exe.clone();
+        let include_expr = true;
         let generate_only = self.convert_generate_only;
         let project_dir = self.project_dir.clone();
         let log_path = self
             .output_dir
             .join(format!("convert_log_{}.txt", chrono_like_timestamp()));
+        self.mock_last_log = Some(log_path.clone());
 
         self.convert_running = true;
-        self.convert_status = Some(format!("Converting with {python_exe}..."));
+        self.convert_log_path = Some(log_path.clone());
+        self.convert_log_text.clear();
+        self.convert_status = Some("Preparing converter environment...".to_string());
         self.convert_handle = Some(thread::spawn(move || {
-            let mut cmd = Command::new(&python_cmd);
+            let mut log = String::new();
+            let mut append = |line: &str| {
+                log.push_str(line);
+                log.push('\n');
+                let _ = std::fs::write(&log_path, &log);
+            };
+
+            append("Conversion started.");
+            append("Preparing the converter environment...");
+            append(&format!("Input file: {input}"));
+            append(&format!("Output file: {output}"));
+
+            let venv_dir = project_dir.join(".stviz_venv");
+            let venv_python = Self::venv_python_path(&venv_dir);
+            let base_env_root = Self::python_env_root(&python_cmd);
+            if !venv_python.exists() {
+                append("Creating a private converter environment...");
+                let mut cmd = Command::new(&python_cmd);
+                cmd.arg("-m").arg("venv").arg(&venv_dir);
+                Self::apply_python_env(&mut cmd, base_env_root.as_deref());
+                let out = cmd.output().map_err(|e| {
+                    append("Failed to create the converter environment.");
+                    append(&format!("Details: {e}"));
+                    format!("Failed to create virtual environment: {e}\nLog: {}", log_path.display())
+                })?;
+                if !out.status.success() {
+                    append("Environment setup output:");
+                    append(&String::from_utf8_lossy(&out.stdout));
+                    append("Environment setup error:");
+                    append(&String::from_utf8_lossy(&out.stderr));
+                    return Err(format!(
+                        "Virtual environment setup failed.\nLog: {}",
+                        log_path.display()
+                    ));
+                }
+            } else {
+                append("Converter environment found.");
+            }
+
+            append("Checking converter dependencies...");
+            let mut check_cmd = Command::new(&venv_python);
+            check_cmd
+                .arg("-c")
+                .arg("import anndata, h5py, numpy, pandas, scipy");
+            Self::apply_python_env(&mut check_cmd, Some(&venv_dir));
+            let check_out = check_cmd.output().map_err(|e| {
+                append("Dependency check failed.");
+                append(&format!("Details: {e}"));
+                format!("Failed to check dependencies: {e}\nLog: {}", log_path.display())
+            })?;
+
+            if !check_out.status.success() {
+                append("Installing converter dependencies (this may take a minute)...");
+                let mut pip_cmd = Command::new(&venv_python);
+                pip_cmd
+                    .arg("-m")
+                    .arg("pip")
+                    .arg("install")
+                    .arg("-U")
+                    .arg("anndata")
+                    .arg("h5py")
+                    .arg("numpy")
+                    .arg("pandas")
+                    .arg("scipy");
+                Self::apply_python_env(&mut pip_cmd, Some(&venv_dir));
+                let pip_out = pip_cmd.output().map_err(|e| {
+                    append("Dependency install failed.");
+                    append(&format!("Details: {e}"));
+                    format!("Failed to install dependencies: {e}\nLog: {}", log_path.display())
+                })?;
+                if !pip_out.status.success() {
+                    append("Install output:");
+                    append(&String::from_utf8_lossy(&pip_out.stdout));
+                    append("Install error:");
+                    append(&String::from_utf8_lossy(&pip_out.stderr));
+                    return Err(format!(
+                        "Dependency install failed.\nLog: {}",
+                        log_path.display()
+                    ));
+                }
+                append("Dependencies installed.");
+            } else {
+                append("Dependencies already installed.");
+            }
+
+            append("Converting dataset...");
+            let mut cmd = Command::new(&venv_python);
             cmd.arg("-X")
                 .arg("faulthandler")
                 .arg(script)
@@ -1008,61 +1313,30 @@ impl StvizApp {
             }
             cmd.env("PYTHONFAULTHANDLER", "1");
             cmd.current_dir(&project_dir);
+            Self::apply_python_env(&mut cmd, Some(&venv_dir));
 
-            let env_root = Self::python_env_root(&python_cmd);
-            let path_prefix = Self::apply_python_env(&mut cmd, env_root.as_deref());
-
-            let mut log = String::new();
-            log.push_str("stviz-animate converter log\n");
-            log.push_str(&format!("python_cmd: {python_cmd}\n"));
-            log.push_str(&format!("python_exe: {python_exe_label}\n"));
-            log.push_str(&format!("project_dir: {}\n", project_dir.display()));
-            log.push_str(&format!("input: {input}\n"));
-            log.push_str(&format!("output: {output}\n"));
-            if let Some(root) = env_root.as_ref() {
-                log.push_str(&format!("env_root: {}\n", root.display()));
-            }
-            if let Some(prefix) = path_prefix.as_ref() {
-                log.push_str(&format!("path_prefix: {prefix}\n"));
-            }
-
-            let out = match cmd.output() {
-                Ok(out) => out,
-                Err(e) => {
-                    log.push_str(&format!("spawn_error: {e}\n"));
-                    let _ = std::fs::write(&log_path, log);
-                    return Err(format!(
-                        "Failed to run exporter: {e}\nLog: {}",
-                        log_path.display()
-                    ));
-                }
-            };
-            log.push_str(&format!("status: {}\n", out.status));
-            log.push_str("stdout:\n");
-            log.push_str(&String::from_utf8_lossy(&out.stdout));
-            log.push_str("\nstderr:\n");
-            log.push_str(&String::from_utf8_lossy(&out.stderr));
-            let _ = std::fs::write(&log_path, log);
-
+            let out = cmd.output().map_err(|e| {
+                append("Conversion failed to start.");
+                append(&format!("Details: {e}"));
+                format!("Failed to run exporter: {e}\nLog: {}", log_path.display())
+            })?;
             if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                let stdout = String::from_utf8_lossy(&out.stdout);
+                append("Conversion output:");
+                append(&String::from_utf8_lossy(&out.stdout));
+                append("Conversion error:");
+                append(&String::from_utf8_lossy(&out.stderr));
                 return Err(format!(
-                    "Exporter failed (python: {python_exe_label}, {}):\n{}\n{}\nLog: {}",
-                    out.status,
-                    stdout,
-                    stderr,
+                    "Conversion failed.\nLog: {}",
                     log_path.display()
                 ));
             }
+            append("Conversion completed.");
             let stdout = String::from_utf8_lossy(&out.stdout);
             Ok(ConvertResult {
-                msg: format!(
-                    "Conversion done (python: {python_exe_label}):\n{}",
-                    stdout.trim()
-                ),
+                msg: format!("Conversion completed.\n{}", stdout.trim()),
                 output: PathBuf::from(output),
                 load_after: !generate_only,
+                python_exe: Some(venv_python.display().to_string()),
             })
         }));
     }
@@ -1182,37 +1456,35 @@ impl StvizApp {
     fn ui_left_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("stviz-animate");
 
+        ui.separator();
+        ui.label("Mock dataset");
         ui.horizontal(|ui| {
-            ui.label("Python (optional)");
-            let edit = egui::TextEdit::singleline(&mut self.convert_python_cmd)
-                .desired_width(180.0)
-                .hint_text("python or /path/to/python");
-            ui.add(edit);
-            if ui.button("Pick python").clicked() {
-                let mut dialog = rfd::FileDialog::new().set_title("Select Python");
-                if let Some(dir) = Self::python_picker_start_dir() {
-                    dialog = dialog.set_directory(dir);
-                }
-                if let Some(path) = dialog.pick_file() {
-                    self.convert_python_cmd = path.display().to_string();
-                }
+            ui.label("Cells");
+            ui.add(
+                egui::DragValue::new(&mut self.mock_cells)
+                    .speed(1_000.0)
+                    .range(10_000..=10_000_000),
+            );
+            ui.label("10k - 10M");
+        });
+        ui.horizontal(|ui| {
+            let generate = ui.add_enabled(
+                !self.convert_running,
+                egui::Button::new("Generate mock dataset"),
+            );
+            if generate.clicked() {
+                self.start_mock_dataset();
+            }
+            let regen = ui.add_enabled(
+                !self.convert_running && self.mock_last_h5ad.is_some(),
+                egui::Button::new("Regenerate mock dataset"),
+            );
+            if regen.clicked() {
+                self.start_mock_dataset();
             }
         });
-        let override_cmd = self.convert_python_cmd.trim();
-        if !override_cmd.is_empty() {
-            ui.label(format!("Python override: {override_cmd}"));
-        } else if let Some(env_py) = Self::python_from_env() {
-            ui.label(format!("Env Python: {env_py}"));
-        } else {
-            ui.label("Env Python: none (auto-detects from PATH)");
-        }
-        if let Some(exe) = self.convert_last_python_exe.as_ref() {
-            ui.label(format!("Last used: {exe}"));
-        }
-        ui.checkbox(
-            &mut self.convert_include_expr,
-            "Include gene expression data",
-        );
+
+        ui.label("Note: conversion may take a minute or two for datasets >1GB.");
         ui.checkbox(
             &mut self.convert_generate_only,
             "Generate .stviz file only - don't load",
@@ -1288,6 +1560,17 @@ impl StvizApp {
         }
 
         ui.separator();
+        egui::CollapsingHeader::new("Conversion log")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut self.convert_log_text)
+                        .desired_rows(6)
+                        .interactive(false),
+                );
+            });
+
+        ui.separator();
         if ui
             .button("Open .stviz")
             .on_hover_text("Open a .stviz dataset.")
@@ -1328,28 +1611,34 @@ impl StvizApp {
         }
 
         ui.separator();
+        ui.label("View controls");
 
-        let Some(ds) = self.dataset.clone() else {
-            ui.label("No dataset loaded.");
-            return;
-        };
-
-        ui.label(format!("Points: {}", ds.meta.n_points));
-        if let Some(p) = self.dataset_path.as_ref() {
-            ui.label(p.display().to_string());
-        }
-
-        ui.separator();
-        ui.label("View");
-
-        ui.add(egui::Slider::new(&mut self.ui_scale, 0.75..=2.5).text("UI scale"));
-        let mut columns = self.keyframe_columns as u32;
-        if ui
-            .add(egui::Slider::new(&mut columns, 1..=4).text("Keyframe columns"))
-            .changed()
-        {
-            self.keyframe_columns = (columns as usize).max(1);
-        }
+        ui.horizontal(|ui| {
+            ui.label("UI scale");
+            let presets = [75, 90, 100, 110, 125, 150, 175, 200];
+            let mut selected = (self.ui_scale * 100.0).round() as i32;
+            egui::ComboBox::from_id_salt("ui_scale_presets")
+                .selected_text(format!("{selected}%"))
+                .show_ui(ui, |ui| {
+                    for pct in presets {
+                        if ui.selectable_value(&mut selected, pct, format!("{pct}%")).clicked() {
+                            self.ui_scale = pct as f32 / 100.0;
+                        }
+                    }
+                });
+            let mut scale_pct = self.ui_scale * 100.0;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut scale_pct)
+                        .range(50.0..=250.0)
+                        .speed(1.0)
+                        .suffix("%"),
+                )
+                .changed()
+            {
+                self.ui_scale = (scale_pct / 100.0).clamp(0.5, 2.5);
+            }
+        });
         let theme_label = match self.ui_theme {
             UiTheme::Dark => "Dark",
             UiTheme::Light => "Light",
@@ -1369,6 +1658,22 @@ impl StvizApp {
             ui.label("Background");
             ui.color_edit_button_srgba(&mut self.background_color);
         });
+
+        ui.separator();
+        ui.label("Loaded dataset");
+
+        let Some(ds) = self.dataset.clone() else {
+            ui.label("No dataset loaded.");
+            return;
+        };
+
+        ui.label(format!("Points: {}", ds.meta.n_points));
+        if let Some(p) = self.dataset_path.as_ref() {
+            ui.label(p.display().to_string());
+        }
+
+        ui.separator();
+        ui.label("View");
 
         let norm_changed = ui.checkbox(&mut self.normalize_spaces, "Normalize space scales").changed();
         ui.checkbox(&mut self.show_axes, "Show axes");
@@ -1459,7 +1764,7 @@ impl StvizApp {
             }
 
             let mut space_idx = self.sample_grid_space_idx.unwrap_or(0);
-            egui::ComboBox::from_label("Grid space")
+            egui::ComboBox::from_label("Grid space (most likely spatial)")
                 .selected_text(ds.meta.spaces.get(space_idx).map(|s| s.name.as_str()).unwrap_or("?"))
                 .show_ui(ui, |ui| {
                     for (i, s) in ds.meta.spaces.iter().enumerate() {
@@ -1867,7 +2172,6 @@ impl StvizApp {
         }
 
         ui.checkbox(&mut self.fast_render, "Fast render (square points)");
-        ui.checkbox(&mut self.opaque_points, "Opaque points (no blending)");
         ui.checkbox(&mut self.show_stats, "Show stats");
 
         ui.separator();
@@ -1898,6 +2202,12 @@ impl StvizApp {
             ui.text_edit_singleline(&mut self.export_name);
         });
         ui.checkbox(&mut self.export_run_ffmpeg, "Run ffmpeg if available");
+        if self.export_run_ffmpeg && !self.ffmpeg_available {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "ffmpeg not found (install it to export video).",
+            );
+        }
         if ui
             .button(if self.exporting_loop { "Exporting..." } else { "Export loop video" })
             .clicked()
@@ -1926,19 +2236,25 @@ impl StvizApp {
             }
             UiTheme::Matrix => {
                 let mut visuals = egui::Visuals::dark();
-                visuals.panel_fill = egui::Color32::from_rgb(6, 10, 8);
-                visuals.window_fill = egui::Color32::from_rgb(6, 10, 8);
-                visuals.override_text_color = Some(egui::Color32::from_rgb(130, 255, 150));
-                visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(10, 18, 12);
-                visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(14, 28, 18);
-                visuals.widgets.active.bg_fill = egui::Color32::from_rgb(18, 36, 22);
+                visuals.panel_fill = egui::Color32::from_rgb(5, 9, 7);
+                visuals.window_fill = egui::Color32::from_rgb(5, 9, 7);
+                visuals.override_text_color = Some(egui::Color32::from_rgb(95, 210, 120));
+                visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(8, 16, 11);
+                visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(12, 24, 16);
+                visuals.widgets.active.bg_fill = egui::Color32::from_rgb(16, 32, 20);
+                visuals.widgets.inactive.bg_stroke =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 150, 90));
+                visuals.widgets.hovered.bg_stroke =
+                    egui::Stroke::new(1.2, egui::Color32::from_rgb(90, 210, 130));
+                visuals.widgets.active.bg_stroke =
+                    egui::Stroke::new(1.4, egui::Color32::from_rgb(120, 245, 160));
                 visuals.widgets.inactive.fg_stroke =
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 200, 120));
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 170, 105));
                 visuals.widgets.hovered.fg_stroke =
-                    egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 255, 160));
-                visuals.selection.bg_fill = egui::Color32::from_rgb(0, 120, 60);
-                visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(120, 255, 170));
-                visuals.hyperlink_color = egui::Color32::from_rgb(90, 220, 120);
+                    egui::Stroke::new(1.2, egui::Color32::from_rgb(110, 230, 150));
+                visuals.selection.bg_fill = egui::Color32::from_rgb(0, 90, 50);
+                visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 230, 150));
+                visuals.hyperlink_color = egui::Color32::from_rgb(80, 190, 110);
                 visuals
             }
         }
@@ -2177,7 +2493,7 @@ impl StvizApp {
 
     fn export_fit_bbox(&mut self, ds: &Dataset) -> Option<[f32; 4]> {
         let mut space_indices: Vec<usize> = Vec::new();
-        if self.transition_mode == TransitionMode::Path && !self.space_path.is_empty() {
+        if !self.space_path.is_empty() {
             space_indices.extend(self.space_path.iter().copied());
         } else {
             space_indices.push(self.from_space);
@@ -2455,6 +2771,16 @@ impl StvizApp {
             .collect();
     }
 
+    fn distribute_key_times_evenly(&mut self) {
+        let len = self.key_times.len();
+        if len < 2 {
+            return;
+        }
+        for (i, t) in self.key_times.iter_mut().enumerate() {
+            *t = i as f32 / (len as f32 - 1.0);
+        }
+    }
+
     fn segment_for_t(&self) -> (usize, f32) {
         let len = self.key_times.len();
         if len < 2 {
@@ -2473,19 +2799,6 @@ impl StvizApp {
         let denom = (t1 - t0).max(1e-6);
         let local = ((t - t0) / denom).clamp(0.0, 1.0);
         (seg_idx, local)
-    }
-
-    fn timeline_segment_index(&self) -> usize {
-        let len = self.key_times.len();
-        if len < 2 {
-            return 0;
-        }
-        let t = self.t.clamp(0.0, 1.0);
-        let mut seg_idx = 0usize;
-        while seg_idx + 1 < len && t > self.key_times[seg_idx + 1] {
-            seg_idx += 1;
-        }
-        seg_idx.min(len.saturating_sub(2))
     }
 
     fn compute_colors_for_key(ds: &Dataset, key: &ColorKey) -> Option<(Vec<u32>, Option<LegendRange>)> {
@@ -2584,71 +2897,51 @@ impl StvizApp {
     fn current_segment(&self, ds: &Dataset) -> (usize, usize, ColorKey, ColorKey, f32) {
         let n_spaces = ds.meta.spaces.len();
         let clamp_idx = |idx: usize| idx.min(n_spaces.saturating_sub(1));
-        match self.transition_mode {
-            TransitionMode::Single => {
-                let mut from = clamp_idx(self.from_space);
-                let mut to = clamp_idx(self.to_space);
-                if self.space_path.len() >= 2 {
-                    from = clamp_idx(self.space_path[0]);
-                    to = clamp_idx(self.space_path[1]);
-                }
-                let (color_from, color_to) = if self.color_path_enabled && self.color_path.len() >= 2 {
-                    let cf = self.color_path.get(0).cloned().unwrap_or(ColorKey::Current);
-                    let ct = self.color_path.get(1).cloned().unwrap_or(ColorKey::Current);
-                    (cf, ct)
-                } else {
-                    (ColorKey::Current, ColorKey::Current)
-                };
-                (from, to, color_from, color_to, self.t.clamp(0.0, 1.0))
-            }
-            TransitionMode::Path => {
-                let mut path: Vec<usize> = self
-                    .space_path
-                    .iter()
-                    .copied()
-                    .filter(|i| *i < n_spaces)
-                    .collect();
-                if path.len() < 2 {
-                    path = vec![clamp_idx(self.from_space), clamp_idx(self.to_space)];
-                }
-                let (mut seg_idx, mut local_t) = if self.key_times.len() == path.len() && path.len() >= 2 {
-                    self.segment_for_t()
-                } else {
-                    let segs = path.len().saturating_sub(1).max(1);
-                    let total = segs as f32;
-                    let scaled = (self.t.clamp(0.0, 1.0)) * total;
-                    let mut idx = scaled.floor() as usize;
-                    let mut local = scaled - idx as f32;
-                    if idx >= segs {
-                        idx = segs - 1;
-                        local = 1.0;
-                    }
-                    (idx, local)
-                };
-                if seg_idx >= path.len().saturating_sub(1) {
-                    seg_idx = path.len().saturating_sub(2);
-                    local_t = 1.0;
-                }
-                let from = path[seg_idx];
-                let to = path[seg_idx + 1];
-                let (color_from, color_to) = if self.color_path_enabled && self.color_path.len() >= 2 {
-                    let cf = self
-                        .color_path
-                        .get(seg_idx)
-                        .cloned()
-                        .unwrap_or(ColorKey::Current);
-                    let ct = self
-                        .color_path
-                        .get(seg_idx + 1)
-                        .cloned()
-                        .unwrap_or_else(|| cf.clone());
-                    (cf, ct)
-                } else {
-                    (ColorKey::Current, ColorKey::Current)
-                };
-                (from, to, color_from, color_to, local_t.clamp(0.0, 1.0))
-            }
+        let mut path: Vec<usize> = self
+            .space_path
+            .iter()
+            .copied()
+            .filter(|i| *i < n_spaces)
+            .collect();
+        if path.len() < 2 {
+            path = vec![clamp_idx(self.from_space), clamp_idx(self.to_space)];
         }
+        let (mut seg_idx, mut local_t) = if self.key_times.len() == path.len() && path.len() >= 2 {
+            self.segment_for_t()
+        } else {
+            let segs = path.len().saturating_sub(1).max(1);
+            let total = segs as f32;
+            let scaled = (self.t.clamp(0.0, 1.0)) * total;
+            let mut idx = scaled.floor() as usize;
+            let mut local = scaled - idx as f32;
+            if idx >= segs {
+                idx = segs - 1;
+                local = 1.0;
+            }
+            (idx, local)
+        };
+        if seg_idx >= path.len().saturating_sub(1) {
+            seg_idx = path.len().saturating_sub(2);
+            local_t = 1.0;
+        }
+        let from = path[seg_idx];
+        let to = path[seg_idx + 1];
+        let (color_from, color_to) = if self.color_path_enabled && self.color_path.len() >= 2 {
+            let cf = self
+                .color_path
+                .get(seg_idx)
+                .cloned()
+                .unwrap_or(ColorKey::Current);
+            let ct = self
+                .color_path
+                .get(seg_idx + 1)
+                .cloned()
+                .unwrap_or_else(|| cf.clone());
+            (cf, ct)
+        } else {
+            (ColorKey::Current, ColorKey::Current)
+        };
+        (from, to, color_from, color_to, local_t.clamp(0.0, 1.0))
     }
 
     fn draw_view_overlays(&self, ui: &egui::Ui, rect: egui::Rect) {
@@ -2729,7 +3022,6 @@ impl StvizApp {
             self.ensure_key_times_len(self.space_path.len());
         }
 
-        let prev_mode = self.transition_mode;
         ui.horizontal(|ui| {
             if ui
                 .button(if self.playing { "Pause" } else { "Play" })
@@ -2757,10 +3049,6 @@ impl StvizApp {
             }
 
             ui.separator();
-            ui.label("Mode");
-            ui.selectable_value(&mut self.transition_mode, TransitionMode::Single, "Single");
-            ui.selectable_value(&mut self.transition_mode, TransitionMode::Path, "Path");
-            ui.separator();
             ui.label("Playback");
             ui.selectable_value(&mut self.playback_mode, PlaybackMode::Once, "Once");
             ui.selectable_value(&mut self.playback_mode, PlaybackMode::Loop, "Loop");
@@ -2784,16 +3072,6 @@ impl StvizApp {
                     ui.selectable_value(&mut self.ease_mode, EaseMode::QuadInOut, "Quad in-out");
                 });
         });
-        if prev_mode != self.transition_mode {
-            if self.transition_mode == TransitionMode::Single {
-                self.ensure_space_path_len(ds_ref, 2);
-            } else {
-                let desired_len = self.space_path.len().max(2);
-                self.ensure_space_path_len(ds_ref, desired_len);
-            }
-            self.ensure_color_path_len(self.space_path.len());
-        }
-
         let timeline_height = 36.0;
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), timeline_height),
@@ -2866,23 +3144,22 @@ impl StvizApp {
                 .on_hover_text("Insert a keyframe after the current segment.")
                 .clicked()
             {
-                if self.transition_mode == TransitionMode::Single {
-                    self.transition_mode = TransitionMode::Path;
-                }
                 if self.space_path.len() >= 2 {
-                    let seg = self.timeline_segment_index();
-                    let insert_at = (seg + 1).min(self.space_path.len() - 1);
-                    let space = self.space_path.get(seg).copied().unwrap_or(0);
-                    let color = self.color_path.get(seg).cloned().unwrap_or(ColorKey::Current);
-                    let t0 = *self.key_times.get(seg).unwrap_or(&0.0);
-                    let t1 = *self.key_times.get(seg + 1).unwrap_or(&1.0);
-                    let new_t = 0.5 * (t0 + t1);
-                    self.space_path.insert(insert_at, space);
-                    self.color_path.insert(insert_at, color);
-                    if self.key_times.len() >= insert_at {
-                        self.key_times.insert(insert_at, new_t);
+                    let space = *self.space_path.last().unwrap_or(&0);
+                    let color = self
+                        .color_path
+                        .last()
+                        .cloned()
+                        .unwrap_or(ColorKey::Current);
+                    self.space_path.push(space);
+                    self.color_path.push(color);
+                    if self.key_times.len() + 1 == self.space_path.len() {
+                        self.key_times.push(0.0);
+                    } else {
+                        self.ensure_key_times_len(self.space_path.len());
                     }
-                    self.selected_key_idx = Some(insert_at);
+                    self.selected_key_idx = Some(self.space_path.len() - 1);
+                    self.distribute_key_times_evenly();
                 }
             }
             if ui
@@ -2890,12 +3167,7 @@ impl StvizApp {
                 .on_hover_text("Distribute keyframes evenly across the timeline.")
                 .clicked()
             {
-                let len = self.key_times.len();
-                if len >= 2 {
-                    for (i, t) in self.key_times.iter_mut().enumerate() {
-                        *t = i as f32 / (len as f32 - 1.0);
-                    }
-                }
+                self.distribute_key_times_evenly();
             }
             let can_remove = self.space_path.len() > 2 && self.selected_key_idx.is_some();
             if ui
@@ -2922,6 +3194,19 @@ impl StvizApp {
                     }
                 }
             }
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 0.0),
+                egui::Layout::right_to_left(egui::Align::Center),
+                |ui| {
+                    let mut columns = self.keyframe_columns as u32;
+                    let slider = egui::Slider::new(&mut columns, 1..=4).show_value(false);
+                    if ui.add(slider).changed() {
+                        self.keyframe_columns = (columns as usize).max(1);
+                    }
+                    ui.label("Keyframes per column");
+                },
+            );
         });
 
         let categorical_opts: Vec<(usize, String)> = ds_ref
@@ -3113,10 +3398,6 @@ impl StvizApp {
         self.from_space = *self.space_path.first().unwrap_or(&self.from_space);
         self.to_space = *self.space_path.last().unwrap_or(&self.to_space);
 
-        if self.transition_mode == TransitionMode::Single {
-            self.ensure_space_path_len(ds_ref, 2);
-        }
-
         if self.playing {
             ctx.request_repaint();
         }
@@ -3166,6 +3447,12 @@ impl StvizApp {
     }
 }
 
+impl Drop for StvizApp {
+    fn drop(&mut self) {
+        Self::cleanup_mock_artifacts(&self.output_dir);
+    }
+}
+
 impl eframe::App for StvizApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         ctx.set_zoom_factor(self.ui_scale);
@@ -3173,6 +3460,9 @@ impl eframe::App for StvizApp {
         self.handle_screenshot_events(ctx);
         self.handle_hotkeys(ctx);
         self.poll_convert_job();
+        if self.convert_running {
+            self.refresh_convert_log();
+        }
         self.maybe_update_playback(ctx);
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
@@ -3181,11 +3471,15 @@ impl eframe::App for StvizApp {
             });
         });
 
-        egui::SidePanel::left("left_panel").resizable(true).default_width(320.0).show(ctx, |ui| {
-            egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                self.ui_left_panel(ui, ctx);
+        egui::SidePanel::left("left_panel")
+            .resizable(true)
+            .default_width(320.0)
+            .max_width(480.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
+                    self.ui_left_panel(ui, ctx);
+                });
             });
-        });
 
         egui::TopBottomPanel::bottom("timeline_bar")
             .resizable(true)

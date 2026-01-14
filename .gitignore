@@ -2,6 +2,9 @@
 /output
 /data
 /frames
+/.stviz_venv
+__pycache__/
+*.pyc
 *.stviz
 *.h5ad
 *.png
