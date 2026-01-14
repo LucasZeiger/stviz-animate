@@ -1,0 +1,163 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Count 2 /Kids [3 0 R 5 0 R] >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 7 0 R >> >> >>
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>
+endobj
+4 0 obj
+<< /Length 2175 >>
+stream
+BT
+/F1 12 Tf
+15 TL
+72 720 Td
+(STVIZ-ANIMATE DOCUMENTATION) Tj
+T*
+() Tj
+T*
+(OVERVIEW) Tj
+T*
+() Tj
+T*
+(stviz-animate is a desktop viewer for spatial transcriptomics timelines. It loads .stviz) Tj
+T*
+(datasets, animates transitions across embeddings, and exports loops for presentations. The) Tj
+T*
+(UI is optimized for large point clouds, with timeline keyframes, gene coloring, and) Tj
+T*
+(recording tools.) Tj
+T*
+() Tj
+T*
+(QUICK START) Tj
+T*
+() Tj
+T*
+(1. Run the app: - `cargo run --release` 2. Load data: - Drop a .h5ad file in the) Tj
+T*
+(conversion box, or open a .stviz file directly. 3. Explore: - Pick spaces and color modes,) Tj
+T*
+(then add keyframes and press Play.) Tj
+T*
+() Tj
+T*
+(DATA IMPORT AND CONVERSION) Tj
+T*
+() Tj
+T*
+(- Drop or pick a .h5ad file to convert it to .stviz. - The conversion log is collapsible) Tj
+T*
+(and shows friendly progress updates. - Output files are saved in `output/`. - Large) Tj
+T*
+(datasets \(>1GB\) can take a minute or two to convert. - Use "Generate .stviz file only -) Tj
+T*
+(don't load" when you only want the file.) Tj
+T*
+() Tj
+T*
+(MOCK DATASET) Tj
+T*
+() Tj
+T*
+(- Use "Generate mock dataset" to create a test .h5ad with 10k to 10M cells \(default 500k\).) Tj
+T*
+(- The generator creates clustered, patterned UMAP, tSNE, PCA, and spatial distributions. -) Tj
+T*
+(Old mock datasets and logs are cleaned on startup and exit to avoid clutter.) Tj
+T*
+() Tj
+T*
+(TIMELINE AND KEYFRAMES) Tj
+T*
+() Tj
+T*
+(- The timeline shows keyframes and playback position. - Add keyframes to append them to) Tj
+T*
+(the end; keyframes are evenly spaced by default. - "Space evenly" redistributes times) Tj
+T*
+(across the full range. - Use "Keyframes per column" to control the keyframe list layout.) Tj
+T*
+() Tj
+T*
+(RENDERING AND VIEW) Tj
+T*
+() Tj
+T*
+(- UI scale presets \(with a fine-tune field\) are always available in the left panel. -) Tj
+T*
+(Themes include Dark, Light, Slate, and Matrix. - Point radius defaults to 0.5px with a) Tj
+T*
+(slider clamped to 0.5-2.0. - Stats can be shown in the top-right overlay.) Tj
+T*
+() Tj
+T*
+(EXPORT) Tj
+T*
+() Tj
+T*
+(- Record loops or frame sequences from the timeline. - The app writes output under) Tj
+T*
+ET
+endstream
+endobj
+6 0 obj
+<< /Length 626 >>
+stream
+BT
+/F1 12 Tf
+15 TL
+72 720 Td
+(`output/` \(frames, videos, screenshots\). - ffmpeg is required to assemble videos from) Tj
+T*
+(frames.) Tj
+T*
+() Tj
+T*
+(OUTPUT LOCATIONS) Tj
+T*
+() Tj
+T*
+(- Conversions: `output/*.stviz` - Mock datasets: `output/mock_spatial_*.h5ad` \(temporary\)) Tj
+T*
+(- Logs: `output/convert_log_*.txt` - Screenshots: `output/*_screenshot_*.png` - Videos:) Tj
+T*
+(`output/*.mp4`) Tj
+T*
+() Tj
+T*
+(TROUBLESHOOTING) Tj
+T*
+() Tj
+T*
+(- If GPU rendering is not used on Linux, install proper GPU drivers and Vulkan. - WSL) Tj
+T*
+(environments typically run on CPU; native Linux with drivers should use GPU.) Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000247 00000 n 
+0000000373 00000 n 
+0000002600 00000 n 
+0000003277 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+3347
+%%EOF

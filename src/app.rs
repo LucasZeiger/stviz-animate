@@ -1,6 +1,6 @@
 use crate::{
     camera::Camera2D,
-    color::{categorical_palette, gradient_map, pack_rgba8},
+    color::{categorical_palette, categorical_palette_named, gradient_map, pack_rgba8},
     data::{Dataset, ObsMeta},
     render::{PointCloudGpu, SharedRender, Uniforms},
 };
@@ -33,6 +33,9 @@ pub struct StvizApp {
     // Color mode
     color_mode: ColorMode,
     active_obs_idx: usize, // index into meta.obs
+    categorical_palette: CategoricalPalette,
+    category_overrides: HashMap<usize, Vec<Option<u32>>>,
+    category_palette_cache: Option<CategoryPaletteCache>,
 
     // Categorical filtering (only when categorical mode)
     enabled_categories: Vec<bool>,
@@ -45,7 +48,8 @@ pub struct StvizApp {
     selected_key_idx: Option<usize>,
     timeline_height: f32,
     key_times: Vec<f32>,
-    keyframe_columns: usize,
+    dragging_key_idx: Option<usize>,
+    key_collapsed: Vec<bool>,
 
     // Playback
     playing: bool,
@@ -57,12 +61,12 @@ pub struct StvizApp {
     point_radius_px: f32,
     max_draw_points: usize,
     fast_render: bool,
-    opaque_points: bool,
 
     // Render plumbing
     shared: Arc<SharedRender>,
     colors_id: u64,
     colors_rgba8: Arc<Vec<u32>>,
+    colors_opaque: bool,
     indices_id: u64,
     base_indices: Vec<u32>,
     draw_indices: Arc<Vec<u32>>,
@@ -87,6 +91,7 @@ pub struct StvizApp {
 
     // .h5ad -> .stviz conversion
     convert_generate_only: bool,
+    convert_include_expr: bool,
     convert_input: String,
     convert_output: String,
     convert_status: Option<String>,
@@ -105,6 +110,7 @@ pub struct StvizApp {
     ui_theme: UiTheme,
     background_color: egui::Color32,
     normalize_spaces: bool,
+    fullscreen: bool,
     show_axes: bool,
     show_stats: bool,
     adapter_label: String,
@@ -178,6 +184,24 @@ enum UiTheme {
     Matrix,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CategoricalPalette {
+    Tableau10,
+    Tab10,
+    Tab20,
+    Category10,
+    Set1,
+    Set2,
+    Set3,
+    Dark2,
+    Accent,
+    Paired,
+    Pastel1,
+    Pastel2,
+    Turbo,
+    Dataset,
+}
+
 #[derive(Clone, Debug)]
 struct LegendRange {
     label: String,
@@ -190,6 +214,16 @@ struct ColorCacheEntry {
     colors: Arc<Vec<u32>>,
     id: u64,
     legend: Option<LegendRange>,
+    opaque: bool,
+}
+
+#[derive(Clone, Debug)]
+struct CategoryPaletteCache {
+    obs_idx: usize,
+    categories_len: usize,
+    palette: CategoricalPalette,
+    has_dataset_palette: bool,
+    colors: Vec<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,6 +269,7 @@ impl StvizApp {
             "{} ({:?}, {:?})",
             adapter_info.name, adapter_info.device_type, adapter_info.backend
         );
+        let cpu_adapter = matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
 
         let project_dir = Self::resolve_project_dir();
         let output_dir = project_dir.join("output");
@@ -254,6 +289,9 @@ impl StvizApp {
 
             color_mode: ColorMode::Categorical,
             active_obs_idx: 0,
+            categorical_palette: CategoricalPalette::Tableau10,
+            category_overrides: HashMap::new(),
+            category_palette_cache: None,
             enabled_categories: Vec::new(),
             category_state: HashMap::new(),
             active_filters: HashSet::new(),
@@ -264,7 +302,8 @@ impl StvizApp {
             selected_key_idx: None,
             timeline_height: 160.0,
             key_times: Vec::new(),
-            keyframe_columns: 3,
+            dragging_key_idx: None,
+            key_collapsed: Vec::new(),
 
             playing: false,
             t: 0.0,
@@ -274,12 +313,12 @@ impl StvizApp {
             ease_mode: EaseMode::Smoothstep,
             point_radius_px: 0.5,
             max_draw_points: 0,
-            fast_render: false,
-            opaque_points: false,
+            fast_render: cpu_adapter,
 
             shared: Arc::new(SharedRender::new(target_format)),
             colors_id: 1,
             colors_rgba8: Arc::new(Vec::new()),
+            colors_opaque: true,
             indices_id: 1,
             base_indices: Vec::new(),
             draw_indices: Arc::new(Vec::new()),
@@ -302,6 +341,7 @@ impl StvizApp {
             ffmpeg_available: Command::new("ffmpeg").arg("-version").output().is_ok(),
 
             convert_generate_only: false,
+            convert_include_expr: true,
             convert_input: String::new(),
             convert_output: String::new(),
             convert_status: None,
@@ -319,6 +359,7 @@ impl StvizApp {
             ui_theme: UiTheme::Dark,
             background_color: egui::Color32::BLACK,
             normalize_spaces: true,
+            fullscreen: false,
             show_axes: true,
             show_stats: true,
             adapter_label,
@@ -341,6 +382,95 @@ impl StvizApp {
 
             last_viewport_points: egui::Rect::ZERO,
         }
+    }
+
+    fn apply_fullscreen(&self, ctx: &egui::Context) {
+        if Self::is_wsl() {
+            return;
+        }
+        let enable = self.fullscreen;
+        let is_wayland = std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+        if is_wayland {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(enable));
+            if !enable {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            }
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enable));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(enable));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!enable));
+        }
+    }
+
+    fn is_wsl() -> bool {
+        std::env::var_os("WSL_DISTRO_NAME").is_some()
+            || std::env::var_os("WSL_INTEROP").is_some()
+    }
+
+    fn categorical_palette_label(palette: CategoricalPalette) -> &'static str {
+        match palette {
+            CategoricalPalette::Tableau10 => "Tableau10",
+            CategoricalPalette::Tab10 => "Tab10",
+            CategoricalPalette::Tab20 => "Tab20",
+            CategoricalPalette::Category10 => "Category10",
+            CategoricalPalette::Set1 => "Set1",
+            CategoricalPalette::Set2 => "Set2",
+            CategoricalPalette::Set3 => "Set3",
+            CategoricalPalette::Dark2 => "Dark2",
+            CategoricalPalette::Accent => "Accent",
+            CategoricalPalette::Paired => "Paired",
+            CategoricalPalette::Pastel1 => "Pastel1",
+            CategoricalPalette::Pastel2 => "Pastel2",
+            CategoricalPalette::Turbo => "Turbo",
+            CategoricalPalette::Dataset => "Dataset",
+        }
+    }
+
+    fn categorical_palette_name(palette: CategoricalPalette) -> &'static str {
+        match palette {
+            CategoricalPalette::Tableau10 => "tableau10",
+            CategoricalPalette::Tab10 => "tab10",
+            CategoricalPalette::Tab20 => "tab20",
+            CategoricalPalette::Category10 => "category10",
+            CategoricalPalette::Set1 => "set1",
+            CategoricalPalette::Set2 => "set2",
+            CategoricalPalette::Set3 => "set3",
+            CategoricalPalette::Dark2 => "dark2",
+            CategoricalPalette::Accent => "accent",
+            CategoricalPalette::Paired => "paired",
+            CategoricalPalette::Pastel1 => "pastel1",
+            CategoricalPalette::Pastel2 => "pastel2",
+            CategoricalPalette::Turbo => "turbo",
+            CategoricalPalette::Dataset => "dataset",
+        }
+    }
+
+    fn categorical_palette_for(
+        &self,
+        obs_idx: usize,
+        categories_len: usize,
+        pal_opt: Option<&[u32]>,
+    ) -> Vec<u32> {
+        let base = match self.categorical_palette {
+            CategoricalPalette::Dataset => pal_opt
+                .map(|p| p.to_vec())
+                .unwrap_or_else(|| categorical_palette_named("tableau10", categories_len)),
+            CategoricalPalette::Turbo => categorical_palette(categories_len),
+            other => categorical_palette_named(Self::categorical_palette_name(other), categories_len),
+        };
+        let mut out = base;
+        if let Some(overrides) = self.category_overrides.get(&obs_idx) {
+            for (i, override_color) in overrides.iter().enumerate() {
+                if let Some(color) = override_color {
+                    if i < out.len() {
+                        out[i] = *color;
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn open_dataset_dialog(&mut self) -> anyhow::Result<()> {
@@ -379,8 +509,11 @@ impl StvizApp {
         self.color_path.push(ColorKey::Current);
         self.color_path.push(ColorKey::Current);
         self.key_times = vec![0.0, 1.0];
+        self.key_collapsed = vec![false; self.space_path.len()];
         self.color_cache.clear();
         self.category_state.clear();
+        self.category_overrides.clear();
+        self.category_palette_cache = None;
         self.active_filters.clear();
         self.load_filter_state(&ds);
 
@@ -428,11 +561,12 @@ impl StvizApp {
                     }
                 }
                 if cat_idx.is_none() {
-                    // fallback: all white
-                    self.colors_rgba8 = Arc::new(vec![pack_rgba8(255, 255, 255, 255); n]);
-                    self.colors_id = self.next_color_id();
-                    self.legend_range = None;
-                    let _ = self.recompute_draw_indices_with_filters();
+                // fallback: all white
+                self.colors_rgba8 = Arc::new(vec![pack_rgba8(255, 255, 255, 255); n]);
+                self.colors_opaque = true;
+                self.colors_id = self.next_color_id();
+                self.legend_range = None;
+                let _ = self.recompute_draw_indices_with_filters();
                     return Ok(());
                 }
                 if !matches!(ds.meta.obs[self.active_obs_idx], ObsMeta::Categorical { .. }) {
@@ -444,10 +578,8 @@ impl StvizApp {
                 let too_many = categories.len() > MAX_FILTER_CATEGORIES;
                 let pal: Vec<u32> = if too_many {
                     categorical_palette(256)
-                } else if let Some(p) = pal_opt {
-                    p.to_vec()
                 } else {
-                    categorical_palette(categories.len())
+                    self.categorical_palette_for(self.active_obs_idx, categories.len(), pal_opt)
                 };
 
                 // init filter toggles
@@ -456,6 +588,7 @@ impl StvizApp {
                 }
 
                 let mut colors = Vec::with_capacity(n);
+                let mut opaque = true;
                 for &lab in labels {
                     let li = lab as usize;
                     let c = if too_many {
@@ -464,10 +597,14 @@ impl StvizApp {
                     } else {
                         pal.get(li).copied().unwrap_or(pack_rgba8(200, 200, 200, 255))
                     };
+                    if (c >> 24) & 0xFF != 255 {
+                        opaque = false;
+                    }
                     colors.push(c);
                 }
 
                 self.colors_rgba8 = Arc::new(colors);
+                self.colors_opaque = opaque;
                 self.colors_id = self.next_color_id();
                 self.legend_range = None;
 
@@ -490,6 +627,7 @@ impl StvizApp {
                 }
                 if cont_idx.is_none() {
                     self.colors_rgba8 = Arc::new(vec![pack_rgba8(255, 255, 255, 255); n]);
+                    self.colors_opaque = true;
                     self.colors_id = self.next_color_id();
                     self.legend_range = None;
                     let _ = self.recompute_draw_indices_with_filters();
@@ -514,6 +652,7 @@ impl StvizApp {
                 }
                 let colors = gradient_map(vals, vmin, vmax, &colorous::VIRIDIS);
                 self.colors_rgba8 = Arc::new(colors);
+                self.colors_opaque = true;
                 self.colors_id = self.next_color_id();
                 self.legend_range = Some(LegendRange {
                     label: name.to_string(),
@@ -669,6 +808,12 @@ impl StvizApp {
         if ctx.wants_keyboard_input() {
             return;
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            if self.fullscreen {
+                self.fullscreen = false;
+                self.apply_fullscreen(ctx);
+            }
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
             self.playing = !self.playing;
         }
@@ -817,10 +962,15 @@ impl StvizApp {
                 Err(msg) => errors.push(msg),
             }
         }
+        let hint = "If Python is installed but not found, run:\n\
+  python -c \"import sys; print(sys.executable)\"\n\
+Then add that path to your system environment variables (PATH).";
         if errors.is_empty() {
-            Err("Python not found. Install Python and ensure `python` or `python3` is on PATH.".to_string())
+            Err(format!(
+                "Python not found. Install Python and ensure `python` or `python3` is on PATH.\n{hint}"
+            ))
         } else {
-            Err(errors.join("\n"))
+            Err(format!("{}\n\n{hint}", errors.join("\n")))
         }
     }
 
@@ -993,7 +1143,7 @@ impl StvizApp {
         let input = h5ad_path.display().to_string();
         let output = stviz_path.display().to_string();
         let script = script.to_string_lossy().to_string();
-        let include_expr = true;
+        let include_expr = self.convert_include_expr;
         let generate_only = self.convert_generate_only;
         let project_dir = self.project_dir.clone();
         let log_path = self
@@ -1015,6 +1165,11 @@ impl StvizApp {
 
             append("Mock dataset generation started.");
             append(&format!("Requested cells: {cells}"));
+            append(if include_expr {
+                "Including gene expression data."
+            } else {
+                "Skipping gene expression data for smaller file size."
+            });
             append("Preparing the converter environment...");
 
             let venv_dir = project_dir.join(".stviz_venv");
@@ -1102,6 +1257,9 @@ impl StvizApp {
                 .arg(cells.to_string())
                 .arg("--seed")
                 .arg(seed.to_string());
+            if !include_expr {
+                mock_cmd.arg("--no-expr");
+            }
             mock_cmd.env("PYTHONFAULTHANDLER", "1");
             mock_cmd.current_dir(&project_dir);
             Self::apply_python_env(&mut mock_cmd, Some(&venv_dir));
@@ -1201,7 +1359,7 @@ impl StvizApp {
         let input = input.to_string();
         let output = output.to_string();
         let script = script.to_string_lossy().to_string();
-        let include_expr = true;
+        let include_expr = self.convert_include_expr;
         let generate_only = self.convert_generate_only;
         let project_dir = self.project_dir.clone();
         let log_path = self
@@ -1222,6 +1380,11 @@ impl StvizApp {
             };
 
             append("Conversion started.");
+            append(if include_expr {
+                "Including gene expression data."
+            } else {
+                "Skipping gene expression data for smaller file size."
+            });
             append("Preparing the converter environment...");
             append(&format!("Input file: {input}"));
             append(&format!("Output file: {output}"));
@@ -1486,6 +1649,10 @@ impl StvizApp {
 
         ui.label("Note: conversion may take a minute or two for datasets >1GB.");
         ui.checkbox(
+            &mut self.convert_include_expr,
+            "Include gene expression data (uncheck for smaller file size)",
+        );
+        ui.checkbox(
             &mut self.convert_generate_only,
             "Generate .stviz file only - don't load",
         );
@@ -1657,6 +1824,18 @@ impl StvizApp {
         ui.horizontal(|ui| {
             ui.label("Background");
             ui.color_edit_button_srgba(&mut self.background_color);
+        });
+        ui.horizontal(|ui| {
+            if Self::is_wsl() {
+                self.fullscreen = false;
+                ui.add_enabled(false, egui::Checkbox::new(&mut self.fullscreen, "Fullscreen"))
+                    .on_hover_text("Fullscreen is not supported on WSL.");
+            } else {
+                let changed = ui.checkbox(&mut self.fullscreen, "Fullscreen").changed();
+                if changed {
+                    self.apply_fullscreen(ctx);
+                }
+            }
         });
 
         ui.separator();
@@ -1838,6 +2017,7 @@ impl StvizApp {
 
                     let mut changed = false;
                     egui::ComboBox::from_label("Obs (cat)")
+                        .width(200.0)
                         .selected_text(current)
                         .show_ui(ui, |ui| {
                             for (i, n) in options {
@@ -1860,21 +2040,95 @@ impl StvizApp {
                         }
                     }
 
+                    let mut palette_changed = false;
+                    let mut colors_changed = false;
+                    ui.horizontal(|ui| {
+                        ui.label("Palette");
+                        let selected = Self::categorical_palette_label(self.categorical_palette);
+                        egui::ComboBox::from_id_salt("cat_palette")
+                            .width(200.0)
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                let options = [
+                                    CategoricalPalette::Tableau10,
+                                    CategoricalPalette::Tab10,
+                                    CategoricalPalette::Tab20,
+                                    CategoricalPalette::Category10,
+                                    CategoricalPalette::Set1,
+                                    CategoricalPalette::Set2,
+                                    CategoricalPalette::Set3,
+                                    CategoricalPalette::Dark2,
+                                    CategoricalPalette::Accent,
+                                    CategoricalPalette::Paired,
+                                    CategoricalPalette::Pastel1,
+                                    CategoricalPalette::Pastel2,
+                                    CategoricalPalette::Turbo,
+                                    CategoricalPalette::Dataset,
+                                ];
+                                for pal in options {
+                                    if ui
+                                        .selectable_value(
+                                            &mut self.categorical_palette,
+                                            pal,
+                                            Self::categorical_palette_label(pal),
+                                        )
+                                        .changed()
+                                    {
+                                        palette_changed = true;
+                                    }
+                                }
+                            });
+                        if ui.button("Reset category colors").clicked() {
+                            self.category_overrides.remove(&self.active_obs_idx);
+                            palette_changed = true;
+                        }
+                    });
+
                     ui.separator();
                     ui.label("Filter categories");
 
-                    if let Ok((_name, _labels, categories, pal_opt)) = ds.obs_categorical(self.active_obs_idx) {
+                    if let Ok((_name, _labels, categories, pal_opt)) =
+                        ds.obs_categorical(self.active_obs_idx)
+                    {
                         let too_many = categories.len() > MAX_FILTER_CATEGORIES;
                         if !too_many && self.enabled_categories.len() != categories.len() {
                             self.enabled_categories = vec![true; categories.len()];
                         }
-                        let palette: Vec<u32> = if too_many {
-                            categorical_palette(256)
-                        } else if let Some(p) = pal_opt {
-                            p.to_vec()
+                        let palette_slice: Option<&[u32]> = if too_many {
+                            None
                         } else {
-                            categorical_palette(categories.len())
+                            let needs_rebuild = match self.category_palette_cache.as_ref() {
+                                Some(cache) => {
+                                    cache.obs_idx != self.active_obs_idx
+                                        || cache.categories_len != categories.len()
+                                        || cache.palette != self.categorical_palette
+                                        || cache.has_dataset_palette != pal_opt.is_some()
+                                }
+                                None => true,
+                            };
+                            if needs_rebuild {
+                                let colors = self.categorical_palette_for(
+                                    self.active_obs_idx,
+                                    categories.len(),
+                                    pal_opt,
+                                );
+                                self.category_palette_cache = Some(CategoryPaletteCache {
+                                    obs_idx: self.active_obs_idx,
+                                    categories_len: categories.len(),
+                                    palette: self.categorical_palette,
+                                    has_dataset_palette: pal_opt.is_some(),
+                                    colors,
+                                });
+                            }
+                            self.category_palette_cache
+                                .as_ref()
+                                .map(|cache| cache.colors.as_slice())
                         };
+                        if self.categorical_palette == CategoricalPalette::Dataset
+                            && pal_opt.is_none()
+                        {
+                            ui.label("No dataset palette found; using Tableau10.");
+                        }
                         if too_many {
                             ui.colored_label(
                                 egui::Color32::YELLOW,
@@ -1884,21 +2138,51 @@ impl StvizApp {
                                 ),
                             );
                         } else {
-                            egui::ScrollArea::vertical().max_height(220.0).show(ui, |ui| {
-                                for (i, c) in categories.iter().enumerate() {
-                                    let color = palette
-                                        .get(i)
-                                        .copied()
-                                        .unwrap_or(pack_rgba8(200, 200, 200, 255));
-                                    let color = color32_from_packed(color);
-                                    ui.horizontal(|ui| {
-                                        ui.checkbox(&mut self.enabled_categories[i], "");
-                                        let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                                        ui.painter().rect_filled(rect, 2.0, color);
-                                        ui.label(c);
-                                    });
-                                }
-                            });
+                            let obs_idx = self.active_obs_idx;
+                            let categories_len = categories.len();
+                            let (enabled_categories, category_overrides) =
+                                (&mut self.enabled_categories, &mut self.category_overrides);
+                            let overrides = category_overrides
+                                .entry(obs_idx)
+                                .or_insert_with(|| vec![None; categories_len]);
+                            if overrides.len() != categories_len {
+                                overrides.resize(categories_len, None);
+                            }
+                            let row_height = ui.spacing().interact_size.y.max(20.0);
+                            egui::ScrollArea::vertical().max_height(220.0).show_rows(
+                                ui,
+                                row_height,
+                                categories.len(),
+                                |ui, range| {
+                                    for i in range {
+                                        let c = &categories[i];
+                                        let mut color = palette_slice
+                                            .and_then(|pal| pal.get(i).copied())
+                                            .unwrap_or(pack_rgba8(200, 200, 200, 255));
+                                        if let Some(override_color) =
+                                            overrides.get(i).and_then(|c| *c)
+                                        {
+                                            color = override_color;
+                                        }
+                                        let mut color = color32_from_packed(color);
+                                        ui.horizontal(|ui| {
+                                            ui.checkbox(&mut enabled_categories[i], "");
+                                            if ui.color_edit_button_srgba(&mut color).changed() {
+                                                if i < overrides.len() {
+                                                    overrides[i] = Some(pack_rgba8(
+                                                        color.r(),
+                                                        color.g(),
+                                                        color.b(),
+                                                        color.a(),
+                                                    ));
+                                                }
+                                                colors_changed = true;
+                                            }
+                                            ui.label(c);
+                                        });
+                                    }
+                                },
+                            );
                         }
 
                         ui.horizontal(|ui| {
@@ -1960,6 +2244,11 @@ impl StvizApp {
                             }
                         }
                     }
+                    if palette_changed || colors_changed {
+                        self.category_palette_cache = None;
+                        self.color_cache.clear();
+                        let _ = self.recompute_colors_and_filters();
+                    }
                 }
             }
             ColorMode::Continuous => {
@@ -1979,6 +2268,7 @@ impl StvizApp {
                         .unwrap_or_else(|| options[0].1.clone());
 
                     egui::ComboBox::from_label("Obs (cont)")
+                        .width(200.0)
                         .selected_text(current)
                         .show_ui(ui, |ui| {
                             for (i, n) in options {
@@ -2059,6 +2349,7 @@ impl StvizApp {
                                 let vmax = vmax.max(1e-6);
                                 let colors = gradient_map(&vec, vmin, vmax, &colorous::VIRIDIS);
                                 self.colors_rgba8 = Arc::new(colors);
+                                self.colors_opaque = true;
                                 self.colors_id = self.next_color_id();
                                 self.legend_range = Some(LegendRange {
                                     label: format!("Gene: {gene}"),
@@ -2102,6 +2393,7 @@ impl StvizApp {
                                 let vmax = vmax.max(1e-6);
                                 let colors = gradient_map(&vec, vmin, vmax, &colorous::VIRIDIS);
                                 self.colors_rgba8 = Arc::new(colors);
+                                self.colors_opaque = true;
                                 self.colors_id = self.next_color_id();
                                 self.legend_range = Some(LegendRange {
                                     label: format!("Gene: {g}"),
@@ -2386,15 +2678,19 @@ impl StvizApp {
         let mut colors_to = self.colors_rgba8.clone();
         let mut colors_to_id = self.colors_id;
         let mut legend_from = self.legend_range.clone();
+        let mut colors_from_opaque = self.colors_opaque;
+        let mut colors_to_opaque = self.colors_opaque;
 
         if let Some(ds) = ds_opt.as_ref() {
             if self.color_path_enabled {
-                let (cf, cf_id, cf_legend) = self.colors_for_key(ds, &color_from);
-                let (ct, ct_id, _ct_legend) = self.colors_for_key(ds, &color_to);
+                let (cf, cf_id, cf_legend, cf_opaque) = self.colors_for_key(ds, &color_from);
+                let (ct, ct_id, _ct_legend, ct_opaque) = self.colors_for_key(ds, &color_to);
                 colors_from = cf;
                 colors_from_id = cf_id;
                 colors_to = ct;
                 colors_to_id = ct_id;
+                colors_from_opaque = cf_opaque;
+                colors_to_opaque = ct_opaque;
                 if color_from != color_to {
                     color_t = t_eased;
                 }
@@ -2440,7 +2736,7 @@ impl StvizApp {
             p.indices_id = self.indices_id;
             p.draw_indices = self.draw_indices.clone();
             p.uniforms = uniforms;
-            p.use_opaque = self.opaque_points;
+            p.use_opaque = colors_from_opaque && colors_to_opaque;
             p.from_override = from_override.clone();
             p.to_override = to_override.clone();
             p.from_override_id = from_override_id;
@@ -2751,6 +3047,7 @@ impl StvizApp {
     fn ensure_key_times_len(&mut self, len: usize) {
         if len == 0 {
             self.key_times.clear();
+            self.key_collapsed.clear();
             return;
         }
         if self.key_times.len() == len {
@@ -2760,15 +3057,22 @@ impl StvizApp {
             if let Some(last) = self.key_times.last_mut() {
                 *last = 1.0;
             }
+            if self.key_collapsed.len() != len {
+                self.key_collapsed.resize(len, false);
+            }
             return;
         }
         if len == 1 {
             self.key_times = vec![0.0];
+            self.key_collapsed = vec![false];
             return;
         }
         self.key_times = (0..len)
             .map(|i| i as f32 / (len as f32 - 1.0))
             .collect();
+        if self.key_collapsed.len() != len {
+            self.key_collapsed.resize(len, false);
+        }
     }
 
     fn distribute_key_times_evenly(&mut self) {
@@ -2779,6 +3083,44 @@ impl StvizApp {
         for (i, t) in self.key_times.iter_mut().enumerate() {
             *t = i as f32 / (len as f32 - 1.0);
         }
+    }
+
+    fn move_keyframe(&mut self, from: usize, to: usize) {
+        let len = self.space_path.len();
+        if len < 2 || from >= len || to >= len || from == to {
+            return;
+        }
+        if self.color_path.len() != len {
+            self.ensure_color_path_len(len);
+        }
+        if self.key_times.len() != len {
+            self.ensure_key_times_len(len);
+        }
+        if self.key_collapsed.len() != len {
+            self.key_collapsed.resize(len, false);
+        }
+
+        let space = self.space_path.remove(from);
+        let color = self.color_path.remove(from);
+        let time = self.key_times.remove(from);
+        let collapsed = self.key_collapsed.remove(from);
+
+        self.space_path.insert(to, space);
+        self.color_path.insert(to, color);
+        self.key_times.insert(to, time);
+        self.key_collapsed.insert(to, collapsed);
+
+        if let Some(selected) = self.selected_key_idx {
+            if selected == from {
+                self.selected_key_idx = Some(to);
+            } else if from < selected && to >= selected {
+                self.selected_key_idx = Some(selected.saturating_sub(1));
+            } else if from > selected && to <= selected {
+                self.selected_key_idx = Some((selected + 1).min(len - 1));
+            }
+        }
+
+        self.distribute_key_times_evenly();
     }
 
     fn segment_for_t(&self) -> (usize, f32) {
@@ -2801,7 +3143,11 @@ impl StvizApp {
         (seg_idx, local)
     }
 
-    fn compute_colors_for_key(ds: &Dataset, key: &ColorKey) -> Option<(Vec<u32>, Option<LegendRange>)> {
+    fn compute_colors_for_key(
+        &self,
+        ds: &Dataset,
+        key: &ColorKey,
+    ) -> Option<(Vec<u32>, Option<LegendRange>, bool)> {
         match key {
             ColorKey::Current => None,
             ColorKey::Categorical(idx) => {
@@ -2809,12 +3155,11 @@ impl StvizApp {
                 let too_many = categories.len() > MAX_FILTER_CATEGORIES;
                 let pal: Vec<u32> = if too_many {
                     categorical_palette(256)
-                } else if let Some(p) = pal_opt {
-                    p.to_vec()
                 } else {
-                    categorical_palette(categories.len())
+                    self.categorical_palette_for(*idx, categories.len(), pal_opt)
                 };
                 let mut colors = Vec::with_capacity(labels.len());
+                let mut opaque = true;
                 for &lab in labels {
                     let li = lab as usize;
                     let c = if too_many {
@@ -2823,9 +3168,12 @@ impl StvizApp {
                     } else {
                         pal.get(li).copied().unwrap_or(pack_rgba8(200, 200, 200, 255))
                     };
+                    if (c >> 24) & 0xFF != 255 {
+                        opaque = false;
+                    }
                     colors.push(c);
                 }
-                Some((colors, None))
+                Some((colors, None, opaque))
             }
             ColorKey::Continuous(idx) => {
                 let (name, vals) = ds.obs_continuous(*idx).ok()?;
@@ -2847,7 +3195,7 @@ impl StvizApp {
                     min: vmin,
                     max: vmax,
                 });
-                Some((colors, legend))
+                Some((colors, legend, true))
             }
             ColorKey::Gene(name) => {
                 let gene = name.trim();
@@ -2870,28 +3218,48 @@ impl StvizApp {
                     min: vmin,
                     max: vmax,
                 });
-                Some((colors, legend))
+                Some((colors, legend, true))
             }
         }
     }
 
-    fn colors_for_key(&mut self, ds: &Dataset, key: &ColorKey) -> (Arc<Vec<u32>>, u64, Option<LegendRange>) {
+    fn colors_for_key(
+        &mut self,
+        ds: &Dataset,
+        key: &ColorKey,
+    ) -> (Arc<Vec<u32>>, u64, Option<LegendRange>, bool) {
         if *key == ColorKey::Current {
-            return (self.colors_rgba8.clone(), self.colors_id, self.legend_range.clone());
+            return (
+                self.colors_rgba8.clone(),
+                self.colors_id,
+                self.legend_range.clone(),
+                self.colors_opaque,
+            );
         }
         if let Some(entry) = self.color_cache.get(key) {
-            return (entry.colors.clone(), entry.id, entry.legend.clone());
+            return (
+                entry.colors.clone(),
+                entry.id,
+                entry.legend.clone(),
+                entry.opaque,
+            );
         }
-        if let Some((colors, legend)) = Self::compute_colors_for_key(ds, key) {
+        if let Some((colors, legend, opaque)) = self.compute_colors_for_key(ds, key) {
             let entry = ColorCacheEntry {
                 colors: Arc::new(colors),
                 id: self.next_color_id(),
                 legend,
+                opaque,
             };
             self.color_cache.insert(key.clone(), entry.clone());
-            return (entry.colors, entry.id, entry.legend);
+            return (entry.colors, entry.id, entry.legend, entry.opaque);
         }
-        (self.colors_rgba8.clone(), self.colors_id, self.legend_range.clone())
+        (
+            self.colors_rgba8.clone(),
+            self.colors_id,
+            self.legend_range.clone(),
+            self.colors_opaque,
+        )
     }
 
     fn current_segment(&self, ds: &Dataset) -> (usize, usize, ColorKey, ColorKey, f32) {
@@ -3153,10 +3521,9 @@ impl StvizApp {
                         .unwrap_or(ColorKey::Current);
                     self.space_path.push(space);
                     self.color_path.push(color);
-                    if self.key_times.len() + 1 == self.space_path.len() {
-                        self.key_times.push(0.0);
-                    } else {
-                        self.ensure_key_times_len(self.space_path.len());
+                    self.key_times.resize(self.space_path.len(), 0.0);
+                    if self.key_collapsed.len() != self.space_path.len() {
+                        self.key_collapsed.resize(self.space_path.len(), false);
                     }
                     self.selected_key_idx = Some(self.space_path.len() - 1);
                     self.distribute_key_times_evenly();
@@ -3184,6 +3551,9 @@ impl StvizApp {
                         if idx < self.key_times.len() {
                             self.key_times.remove(idx);
                         }
+                        if idx < self.key_collapsed.len() {
+                            self.key_collapsed.remove(idx);
+                        }
                         self.selected_key_idx = None;
                         if let Some(first) = self.key_times.first_mut() {
                             *first = 0.0;
@@ -3195,18 +3565,15 @@ impl StvizApp {
                 }
             }
 
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 0.0),
-                egui::Layout::right_to_left(egui::Align::Center),
-                |ui| {
-                    let mut columns = self.keyframe_columns as u32;
-                    let slider = egui::Slider::new(&mut columns, 1..=4).show_value(false);
-                    if ui.add(slider).changed() {
-                        self.keyframe_columns = (columns as usize).max(1);
-                    }
-                    ui.label("Keyframes per column");
-                },
-            );
+        });
+
+        ui.horizontal(|ui| {
+            if ui.button("Collapse all").clicked() {
+                self.key_collapsed = vec![true; self.space_path.len()];
+            }
+            if ui.button("Expand all").clicked() {
+                self.key_collapsed = vec![false; self.space_path.len()];
+            }
         });
 
         let categorical_opts: Vec<(usize, String)> = ds_ref
@@ -3229,80 +3596,185 @@ impl StvizApp {
                 _ => None,
             })
             .collect();
-        egui::ScrollArea::both()
-            .max_height(240.0)
-            .auto_shrink([false; 2])
+        let key_count = self.space_path.len();
+        let mut drag_stop_idx: Option<usize> = None;
+        let mut card_rects: Vec<(usize, egui::Rect)> = Vec::new();
+        let pointer_pos = ctx.input(|i| i.pointer.latest_pos());
+        let mut drag_target: Option<(usize, bool)> = None;
+        egui::ScrollArea::horizontal()
+            .max_height(260.0)
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 let max_idx = ds_ref.meta.spaces.len().saturating_sub(1);
-                let key_count = self.space_path.len();
-                let mut row_start = 0;
-                let columns = self.keyframe_columns.max(1);
-                while row_start < key_count {
-                    let row_end = (row_start + columns).min(key_count);
-                    ui.horizontal(|ui| {
-                        for i in row_start..row_end {
-                            let mut space_idx = self.space_path[i].min(max_idx);
-                            let mut color_key =
-                                self.color_path.get(i).cloned().unwrap_or(ColorKey::Current);
-                            let mut color_kind = match color_key {
-                                ColorKey::Current => KeyColorKind::Current,
-                                ColorKey::Categorical(_) => KeyColorKind::Categorical,
-                                ColorKey::Continuous(_) => KeyColorKind::Continuous,
-                                ColorKey::Gene(_) => KeyColorKind::Gene,
-                            };
-                            let is_selected = Some(i) == self.selected_key_idx;
-                            ui.push_id(i, |ui| {
-                                ui.group(|ui| {
-                                    let label = format!("Key {i}");
-                                    if ui.selectable_label(is_selected, label).clicked() {
-                                        self.selected_key_idx = Some(i);
+                if self.key_collapsed.len() != key_count {
+                    self.key_collapsed.resize(key_count, false);
+                }
+                ui.horizontal(|ui| {
+                    for i in 0..key_count {
+                        let mut space_idx = self.space_path[i].min(max_idx);
+                        let mut color_key =
+                            self.color_path.get(i).cloned().unwrap_or(ColorKey::Current);
+                        let mut color_kind = match color_key {
+                            ColorKey::Current => KeyColorKind::Current,
+                            ColorKey::Categorical(_) => KeyColorKind::Categorical,
+                            ColorKey::Continuous(_) => KeyColorKind::Continuous,
+                            ColorKey::Gene(_) => KeyColorKind::Gene,
+                        };
+                        let is_selected = Some(i) == self.selected_key_idx;
+                        let mut collapsed = self.key_collapsed[i];
+                        let mut frame = egui::Frame::group(ui.style())
+                            .corner_radius(6)
+                            .inner_margin(egui::Margin::same(2));
+                        if is_selected {
+                            frame = frame.stroke(egui::Stroke::new(
+                                1.4,
+                                egui::Color32::from_rgb(80, 180, 255),
+                            ));
+                        }
+                        let inner = ui.scope_builder(
+                            egui::UiBuilder::new().layout(egui::Layout::top_down(egui::Align::Min)),
+                            |ui| {
+                                frame.show(ui, |ui| {
+                                    let prev_spacing = ui.spacing().item_spacing;
+                                    ui.spacing_mut().item_spacing = egui::vec2(prev_spacing.x, 2.0);
+                                    ui.spacing_mut().interact_size.y =
+                                        ui.spacing().interact_size.y.min(20.0);
+                                    let mut drag_handle_resp = None;
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(0.0, 0.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                        let drag_handle = ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("⋮⋮")
+                                                        .size(13.0)
+                                                        .strong()
+                                                        .color(ui.visuals().weak_text_color()),
+                                                )
+                                                .frame(false)
+                                                .small()
+                                                .sense(egui::Sense::drag()),
+                                            )
+                                            .on_hover_text("Drag to reorder keyframes.")
+                                            .on_hover_and_drag_cursor(egui::CursorIcon::Grab);
+                                        drag_handle_resp = Some(drag_handle);
+                                        let header_resp = ui
+                                            .selectable_label(
+                                                is_selected,
+                                                egui::RichText::new(format!("Key {}", i + 1))
+                                                    .strong(),
+                                            )
+                                            .on_hover_text("Click to select this keyframe.");
+                                        if header_resp.clicked() {
+                                            self.selected_key_idx = Some(i);
+                                        }
+                                        if ui
+                                            .small_button(if collapsed { "▸" } else { "▾" })
+                                            .on_hover_text("Collapse/expand this keyframe.")
+                                            .clicked()
+                                        {
+                                            collapsed = !collapsed;
+                                        }
+                                    },
+                                    );
+
+                                    if let Some(drag_handle) = drag_handle_resp {
+                                        if drag_handle.drag_started() || drag_handle.dragged() {
+                                            self.dragging_key_idx = Some(i);
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                        }
+                                        if drag_handle.drag_stopped() {
+                                            drag_stop_idx = Some(i);
+                                        }
                                     }
-                                    ui.label("Space");
-                                    egui::ComboBox::from_id_salt(("kf_space", i))
-                                        .selected_text(
-                                            ds_ref
-                                                .meta
-                                                .spaces
-                                                .get(space_idx)
-                                                .map(|s| s.name.as_str())
-                                                .unwrap_or("?"),
-                                        )
-                                        .show_ui(ui, |ui| {
-                                            for (j, s) in ds_ref.meta.spaces.iter().enumerate() {
-                                                ui.selectable_value(&mut space_idx, j, &s.name);
+
+                                    if collapsed {
+                                        let space_name = ds_ref
+                                            .meta
+                                            .spaces
+                                            .get(space_idx)
+                                            .map(|s| s.name.as_str())
+                                            .unwrap_or("?");
+                                        let color_desc = match &color_key {
+                                            ColorKey::Current => "Current".to_string(),
+                                            ColorKey::Categorical(idx) => {
+                                                format!("Cat: {}", obs_name(ds_ref, *idx))
                                             }
-                                        });
-                                    ui.label("Color");
-                                    let kind_label = match color_kind {
-                                        KeyColorKind::Current => "Current",
-                                        KeyColorKind::Categorical => "Categorical",
-                                        KeyColorKind::Continuous => "Continuous",
-                                        KeyColorKind::Gene => "Gene",
-                                    };
-                                    egui::ComboBox::from_id_salt(("kf_color_kind", i))
-                                        .selected_text(kind_label)
-                                        .show_ui(ui, |ui| {
-                                            ui.selectable_value(
-                                                &mut color_kind,
-                                                KeyColorKind::Current,
-                                                "Current",
-                                            );
-                                            ui.selectable_value(
-                                                &mut color_kind,
-                                                KeyColorKind::Categorical,
-                                                "Categorical",
-                                            );
-                                            ui.selectable_value(
-                                                &mut color_kind,
-                                                KeyColorKind::Continuous,
-                                                "Continuous",
-                                            );
-                                            ui.selectable_value(
-                                                &mut color_kind,
+                                            ColorKey::Continuous(idx) => {
+                                                format!("Cont: {}", obs_name(ds_ref, *idx))
+                                            }
+                                            ColorKey::Gene(name) => format!("Gene: {name}"),
+                                        };
+                                        ui.label(
+                                            egui::RichText::new(format!("{space_name} | {color_desc}"))
+                                                .size(10.5),
+                                        );
+                                        ui.spacing_mut().item_spacing = prev_spacing;
+                                        return;
+                                    }
+
+                                    let control_width = 110.0;
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(0.0, 0.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                        ui.label(egui::RichText::new("Space").size(10.5));
+                                        egui::ComboBox::from_id_salt(("kf_space", i))
+                                            .width(control_width)
+                                            .selected_text(
+                                                ds_ref
+                                                    .meta
+                                                    .spaces
+                                                    .get(space_idx)
+                                                    .map(|s| s.name.as_str())
+                                                    .unwrap_or("?"),
+                                            )
+                                            .show_ui(ui, |ui| {
+                                                for (j, s) in ds_ref.meta.spaces.iter().enumerate() {
+                                                    ui.selectable_value(&mut space_idx, j, &s.name);
+                                                }
+                                            });
+                                    },
+                                    );
+                                    ui.allocate_ui_with_layout(
+                                        egui::vec2(0.0, 0.0),
+                                        egui::Layout::left_to_right(egui::Align::Center),
+                                        |ui| {
+                                        ui.label(egui::RichText::new("Color").size(10.5));
+                                        let kind_label = match color_kind {
+                                            KeyColorKind::Current => "Current",
+                                            KeyColorKind::Categorical => "Categorical",
+                                            KeyColorKind::Continuous => "Continuous",
+                                            KeyColorKind::Gene => "Gene",
+                                        };
+                                        egui::ComboBox::from_id_salt(("kf_color_kind", i))
+                                            .width(control_width)
+                                            .selected_text(kind_label)
+                                            .show_ui(ui, |ui| {
+                                                ui.selectable_value(
+                                                    &mut color_kind,
+                                                    KeyColorKind::Current,
+                                                    "Current",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut color_kind,
+                                                    KeyColorKind::Categorical,
+                                                    "Categorical",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut color_kind,
+                                                    KeyColorKind::Continuous,
+                                                    "Continuous",
+                                                );
+                                                ui.selectable_value(
+                                                    &mut color_kind,
                                                 KeyColorKind::Gene,
                                                 "Gene",
                                             );
                                         });
+                                    },
+                                    );
 
                                     match color_kind {
                                         KeyColorKind::Current => {
@@ -3318,6 +3790,7 @@ impl StvizApp {
                                                     _ => categorical_opts[0].0,
                                                 };
                                                 egui::ComboBox::from_id_salt(("kf_color_cat", i))
+                                                    .width(control_width)
                                                     .selected_text(
                                                         categorical_opts
                                                             .iter()
@@ -3327,7 +3800,11 @@ impl StvizApp {
                                                     )
                                                     .show_ui(ui, |ui| {
                                                         for (idx, name) in &categorical_opts {
-                                                            ui.selectable_value(&mut obs_idx, *idx, name);
+                                                            ui.selectable_value(
+                                                                &mut obs_idx,
+                                                                *idx,
+                                                                name,
+                                                            );
                                                         }
                                                     });
                                                 color_key = ColorKey::Categorical(obs_idx);
@@ -3343,6 +3820,7 @@ impl StvizApp {
                                                     _ => continuous_opts[0].0,
                                                 };
                                                 egui::ComboBox::from_id_salt(("kf_color_cont", i))
+                                                    .width(control_width)
                                                     .selected_text(
                                                         continuous_opts
                                                             .iter()
@@ -3352,7 +3830,11 @@ impl StvizApp {
                                                     )
                                                     .show_ui(ui, |ui| {
                                                         for (idx, name) in &continuous_opts {
-                                                            ui.selectable_value(&mut obs_idx, *idx, name);
+                                                            ui.selectable_value(
+                                                                &mut obs_idx,
+                                                                *idx,
+                                                                name,
+                                                            );
                                                         }
                                                     });
                                                 color_key = ColorKey::Continuous(obs_idx);
@@ -3365,8 +3847,9 @@ impl StvizApp {
                                                     _ => String::new(),
                                                 };
                                                 let edit = egui::TextEdit::singleline(&mut gene)
+                                                    .id(egui::Id::new(("kf_gene", i)))
                                                     .hint_text("Exact gene name")
-                                                    .desired_width(140.0);
+                                                    .desired_width(control_width);
                                                 ui.add(edit);
                                                 if !gene.trim().is_empty()
                                                     && !expr.var_names.iter().any(|name| name == &gene)
@@ -3380,19 +3863,95 @@ impl StvizApp {
                                             }
                                         }
                                     }
-                                });
-                            });
-                            self.space_path[i] = space_idx;
-                            if i < self.color_path.len() {
-                                self.color_path[i] = color_key;
-                            } else {
-                                self.color_path.push(color_key);
-                            }
+                                    ui.spacing_mut().item_spacing = prev_spacing;
+                                })
+                            },
+                        );
+                        let rect = inner.inner.response.rect;
+                        card_rects.push((i, rect));
+                        self.space_path[i] = space_idx;
+                        if i < self.color_path.len() {
+                            self.color_path[i] = color_key;
+                        } else {
+                            self.color_path.push(color_key);
                         }
-                    });
-                    row_start += columns;
-                }
+                        self.key_collapsed[i] = collapsed;
+                        ui.add_space(6.0);
+                    }
+                });
             });
+
+        if let (Some(drag_idx), Some(pos)) = (self.dragging_key_idx, pointer_pos) {
+            if let Some((target_idx, target_rect, insert_after)) = card_rects
+                .iter()
+                .filter_map(|(idx, rect)| {
+                    let center = rect.center();
+                    let dist = (center.x - pos.x).powi(2) + (center.y - pos.y).powi(2);
+                    Some((*idx, *rect, dist))
+                })
+                .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(idx, rect, _)| (idx, rect, pos.x > rect.center().x))
+            {
+                drag_target = Some((target_idx, insert_after));
+                let line_x = if insert_after {
+                    target_rect.right()
+                } else {
+                    target_rect.left()
+                };
+                let line_color = egui::Color32::from_rgb(120, 200, 255);
+                ui.painter().line_segment(
+                    [egui::pos2(line_x, target_rect.top()), egui::pos2(line_x, target_rect.bottom())],
+                    egui::Stroke::new(2.0, line_color),
+                );
+            }
+            if let Some((_, rect)) = card_rects.iter().find(|(idx, _)| *idx == drag_idx) {
+                let size = rect.size();
+                let offset = egui::vec2(12.0, 12.0);
+                let float_rect = egui::Rect::from_min_size(pos + offset, size);
+                let shadow_rect = float_rect.translate(egui::vec2(3.0, 3.0));
+                let shadow_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 90);
+                let card_fill = ui.visuals().widgets.inactive.bg_fill;
+                let card_stroke = ui.visuals().widgets.active.bg_stroke;
+                let text_color = ui.visuals().text_color();
+                ui.painter()
+                    .rect_filled(shadow_rect, 6.0, shadow_color);
+                ui.painter().rect_filled(float_rect, 6.0, card_fill);
+                ui.painter()
+                    .rect_stroke(float_rect, 6.0, card_stroke, egui::StrokeKind::Inside);
+                ui.painter().text(
+                    float_rect.min + egui::vec2(8.0, 8.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("Key {}", drag_idx + 1),
+                    egui::FontId::proportional(12.0),
+                    text_color,
+                );
+            }
+        }
+        if drag_stop_idx.is_none()
+            && self.dragging_key_idx.is_some()
+            && !ctx.input(|i| i.pointer.any_down())
+        {
+            drag_stop_idx = self.dragging_key_idx;
+        }
+
+        if let (Some(drag_idx), Some(stop_idx)) = (self.dragging_key_idx, drag_stop_idx) {
+            if drag_idx == stop_idx {
+                if let Some((target_idx, insert_after)) = drag_target {
+                    let mut insert_idx = if insert_after {
+                        target_idx.saturating_add(1)
+                    } else {
+                        target_idx
+                    };
+                    if insert_idx > drag_idx {
+                        insert_idx = insert_idx.saturating_sub(1);
+                    }
+                    if insert_idx != drag_idx {
+                        self.move_keyframe(drag_idx, insert_idx);
+                    }
+                }
+            }
+            self.dragging_key_idx = None;
+        }
 
         self.ensure_color_path_len(self.space_path.len());
         self.from_space = *self.space_path.first().unwrap_or(&self.from_space);
@@ -3485,6 +4044,7 @@ impl eframe::App for StvizApp {
             .resizable(true)
             .default_height(self.timeline_height)
             .min_height(120.0)
+            .max_height(280.0)
             .show(ctx, |ui| {
                 self.ui_timeline_bar(ui, ctx);
             });
