@@ -70,6 +70,7 @@ impl PointCloudGpu {
         device: &wgpu::Device,
         format: wgpu::TextureFormat,
         blend: Option<wgpu::BlendState>,
+        sample_count: u32,
     ) -> (wgpu::RenderPipeline, wgpu::BindGroupLayout) {
         let shader_src = include_str!("../assets/pointcloud.wgsl");
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -187,7 +188,10 @@ impl PointCloudGpu {
                 ..Default::default()
             },
             depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
+            multisample: wgpu::MultisampleState {
+                count: sample_count,
+                ..Default::default()
+            },
             multiview: None,
             cache: None,
         });
@@ -196,8 +200,21 @@ impl PointCloudGpu {
     }
 
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
-        let (pipeline_alpha, bgl) = Self::create_pipeline(device, format, Some(wgpu::BlendState::ALPHA_BLENDING));
-        let (pipeline_opaque, _) = Self::create_pipeline(device, format, None);
+        Self::new_with_sample_count(device, format, 1)
+    }
+
+    pub fn new_with_sample_count(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+    ) -> Self {
+        let (pipeline_alpha, bgl) = Self::create_pipeline(
+            device,
+            format,
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            sample_count,
+        );
+        let (pipeline_opaque, _) = Self::create_pipeline(device, format, None, sample_count);
 
         let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("pc_uniform"),
@@ -440,7 +457,7 @@ impl PointCloudGpu {
         Ok(())
     }
 
-    pub fn paint(&self, render_pass: &mut wgpu::RenderPass<'static>, opaque: bool) {
+    pub fn paint<'rp>(&self, render_pass: &mut wgpu::RenderPass<'rp>, opaque: bool) {
         if self.n_draw == 0 {
             return;
         }

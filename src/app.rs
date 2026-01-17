@@ -22,12 +22,20 @@ const MAX_FILTER_CATEGORIES: usize = 5000;
 const MAX_GRID_CATEGORIES: usize = 512;
 const ADVANCED_VIEW_FPS_CAP_HZ: f32 = 60.0;
 const MIN_PYTHON_VERSION: (u32, u32) = (3, 8);
+const SCREENSHOT_RESOLUTION: [u32; 2] = [3840, 2160];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportQuality {
     Current,
     FullHd,
     UltraHd,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExportVideoQuality {
+    Standard,
+    High,
+    Ultra,
 }
 
 pub struct StvizApp {
@@ -78,6 +86,7 @@ pub struct StvizApp {
     shared: Arc<SharedRender>,
     render_state: Option<egui_wgpu::RenderState>,
     offscreen_gpu: Option<PointCloudGpu>,
+    offscreen_gpu_msaa: Option<PointCloudGpu>,
     colors_id: u64,
     colors_rgba8: Arc<Vec<u32>>,
     colors_opaque: bool,
@@ -94,6 +103,7 @@ pub struct StvizApp {
     export_duration_sec: f32,
     export_quality: ExportQuality,
     export_resolution: Option<[u32; 2]>,
+    export_video_quality: ExportVideoQuality,
     export_dir: PathBuf,
     export_name: String,
     export_output_path: Option<PathBuf>,
@@ -110,6 +120,8 @@ pub struct StvizApp {
     ffmpeg_path: Option<PathBuf>,
     export_log_path: Option<PathBuf>,
     export_log_text: String,
+    export_log_open: bool,
+    export_log_focus: bool,
 
     // .h5ad -> .stviz conversion
     convert_generate_only: bool,
@@ -132,6 +144,7 @@ pub struct StvizApp {
     ui_theme: UiTheme,
     background_color: egui::Color32,
     fullscreen: bool,
+    viewport_fullscreen: bool,
     show_axes: bool,
     show_stats: bool,
     reset_view_key_idx: usize,
@@ -169,6 +182,10 @@ pub struct StvizApp {
     sample_grid_padding: f32,
     grid_version: u64,
     grid_cache: Option<GridCache>,
+    sample_grid_labels_enabled: bool,
+    sample_grid_label_mode: SampleGridLabelMode,
+    sample_grid_custom_labels_obs_idx: Option<usize>,
+    sample_grid_custom_labels: Vec<String>,
 
     // Legend / gene input
     legend_range: Option<LegendRange>,
@@ -182,6 +199,7 @@ pub struct StvizApp {
 
     // Viewport (for interactions)
     last_viewport_points: egui::Rect,
+    last_viewport_px: [f32; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -204,6 +222,12 @@ enum PlaybackMode {
     Once,
     Loop,
     PingPong,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SampleGridLabelMode {
+    Default,
+    Custom,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -404,6 +428,7 @@ impl StvizApp {
             shared: Arc::new(SharedRender::new(target_format)),
             render_state,
             offscreen_gpu: None,
+            offscreen_gpu_msaa: None,
             colors_id: 1,
             colors_rgba8: Arc::new(Vec::new()),
             colors_opaque: true,
@@ -419,6 +444,7 @@ impl StvizApp {
             export_duration_sec: 5.0,
             export_quality: ExportQuality::Current,
             export_resolution: None,
+            export_video_quality: ExportVideoQuality::High,
             export_dir: output_dir.clone(),
             export_name: String::from("stviz-animate_loop.mp4"),
             export_output_path: None,
@@ -435,6 +461,8 @@ impl StvizApp {
             ffmpeg_available: ffmpeg_path.is_some(),
             export_log_path: None,
             export_log_text: String::new(),
+            export_log_open: false,
+            export_log_focus: false,
 
             convert_generate_only: false,
             convert_include_expr: true,
@@ -455,6 +483,7 @@ impl StvizApp {
             ui_theme: UiTheme::Dark,
             background_color: egui::Color32::BLACK,
             fullscreen: false,
+            viewport_fullscreen: false,
             show_axes: true,
             show_stats: true,
             reset_view_key_idx: 0,
@@ -491,6 +520,10 @@ impl StvizApp {
             sample_grid_padding: 0.15,
             grid_version: 1,
             grid_cache: None,
+            sample_grid_labels_enabled: false,
+            sample_grid_label_mode: SampleGridLabelMode::Default,
+            sample_grid_custom_labels_obs_idx: None,
+            sample_grid_custom_labels: Vec::new(),
 
             legend_range: None,
             active_legend_range: None,
@@ -501,6 +534,7 @@ impl StvizApp {
             last_error: None,
 
             last_viewport_points: egui::Rect::ZERO,
+            last_viewport_px: [0.0, 0.0],
         };
         if app.fullscreen {
             app.apply_fullscreen(&cc.egui_ctx);
@@ -750,6 +784,24 @@ impl StvizApp {
             self.sample_grid_enabled = true;
             self.speed = 0.2;
         }
+        if is_mock {
+            if let Some(space_idx) = find_space_by_name(&ds, "spatial") {
+                if let Some(pos) = self.space_path.iter().position(|idx| *idx == space_idx) {
+                    self.reset_view_key_idx = pos;
+                }
+                if let Some(space) = ds.meta.spaces.get(space_idx) {
+                    let bbox = self.space_bbox_for_view(&ds, space_idx, space);
+                    let viewport_px = if self.last_viewport_px[0] > 0.0
+                        && self.last_viewport_px[1] > 0.0
+                    {
+                        self.last_viewport_px
+                    } else {
+                        [1000.0, 700.0]
+                    };
+                    self.camera.fit_bbox(bbox, viewport_px, 0.9);
+                }
+            }
+        }
 
         self.sample_grid_obs_idx = find_obs_by_name(&ds, "sample");
         self.sample_grid_space_idx = find_space_by_name(&ds, "spatial")
@@ -757,6 +809,8 @@ impl StvizApp {
             .or_else(|| if ds.meta.spaces.is_empty() { None } else { Some(0) });
         self.grid_cache = None;
         self.grid_version = self.grid_version.wrapping_add(1);
+        self.sample_grid_custom_labels.clear();
+        self.sample_grid_custom_labels_obs_idx = None;
 
         // default indices: 0..n
         let n = ds.meta.n_points as usize;
@@ -1151,7 +1205,10 @@ impl StvizApp {
             return;
         }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.fullscreen {
+            if self.viewport_fullscreen {
+                self.viewport_fullscreen = false;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+            } else if self.fullscreen {
                 self.fullscreen = false;
                 self.apply_fullscreen(ctx);
             }
@@ -1467,13 +1524,17 @@ Then add that path to your system environment variables (PATH).";
 
         for candidate in candidates {
             if candidate.exists() {
-                if Command::new(&candidate).arg("-version").output().is_ok() {
+                let mut cmd = Command::new(&candidate);
+                Self::apply_subprocess_flags(&mut cmd);
+                if cmd.arg("-version").output().is_ok() {
                     return Some(candidate);
                 }
             }
         }
 
-        if Command::new("ffmpeg").arg("-version").output().is_ok() {
+        let mut cmd = Command::new("ffmpeg");
+        Self::apply_subprocess_flags(&mut cmd);
+        if cmd.arg("-version").output().is_ok() {
             return Some(PathBuf::from("ffmpeg"));
         }
         None
@@ -1592,6 +1653,7 @@ Then add that path to your system environment variables (PATH).";
     }
 
     fn apply_python_env(cmd: &mut Command, env_root: Option<&Path>) -> Option<String> {
+        Self::apply_subprocess_flags(cmd);
         let env_root = env_root?;
 
         cmd.env_remove("PYTHONHOME");
@@ -1638,6 +1700,15 @@ Then add that path to your system environment variables (PATH).";
             cmd.env("PATH", &prefix);
         }
         Some(prefix)
+    }
+
+    fn apply_subprocess_flags(cmd: &mut Command) {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
     }
 
     fn python_env_root(python_cmd: &str) -> Option<PathBuf> {
@@ -2107,6 +2178,8 @@ Then add that path to your system environment variables (PATH).";
         let _ = std::fs::create_dir_all(&self.export_dir);
         self.export_log_path = Some(self.output_dir.join(format!("export_log_{ts}.txt")));
         self.export_log_text.clear();
+        self.export_log_open = true;
+        self.export_log_focus = true;
         if self.export_name.trim().is_empty() {
             self.export_name = String::from("stviz-animate_loop.mp4");
         }
@@ -2155,6 +2228,14 @@ Then add that path to your system environment variables (PATH).";
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "not found".to_string());
             self.append_export_log(&format!("ffmpeg: {}", ffmpeg_label));
+            let (crf, preset, pix_fmt) = match self.export_video_quality {
+                ExportVideoQuality::Standard => (23, "medium", "yuv420p"),
+                ExportVideoQuality::High => (18, "slow", "yuv420p"),
+                ExportVideoQuality::Ultra => (14, "slow", "yuv420p"),
+            };
+            self.append_export_log(&format!(
+                "Encoding: libx264, CRF {crf}, preset {preset}, {pix_fmt}"
+            ));
             if self.ffmpeg_path.is_none() {
                 self.append_export_log("ffmpeg missing; will try OpenCV fallback.");
             }
@@ -2232,7 +2313,14 @@ Then add that path to your system environment variables (PATH).";
         if let Some(ffmpeg_bin) = self.ffmpeg_path.clone() {
             let pattern = frames_dir.join("frame_%06d.png").to_string_lossy().to_string();
             let out_str = out_path.to_string_lossy().to_string();
-            let status = std::process::Command::new(&ffmpeg_bin)
+            let mut cmd = std::process::Command::new(&ffmpeg_bin);
+            Self::apply_subprocess_flags(&mut cmd);
+            let (crf, preset, pix_fmt) = match self.export_video_quality {
+                ExportVideoQuality::Standard => (23, "medium", "yuv420p"),
+                ExportVideoQuality::High => (18, "slow", "yuv420p"),
+                ExportVideoQuality::Ultra => (14, "slow", "yuv420p"),
+            };
+            let output = cmd
                 .arg("-y")
                 .arg("-framerate")
                 .arg(self.export_fps.to_string())
@@ -2240,13 +2328,17 @@ Then add that path to your system environment variables (PATH).";
                 .arg(&pattern)
                 .arg("-c:v")
                 .arg("libx264")
+                .arg("-preset")
+                .arg(preset)
+                .arg("-crf")
+                .arg(crf.to_string())
                 .arg("-pix_fmt")
-                .arg("yuv420p")
+                .arg(pix_fmt)
                 .arg(&out_str)
-                .status();
+                .output();
 
-            match status {
-                Ok(s) if s.success() => {
+            match output {
+                Ok(out) if out.status.success() => {
                     if keep_frames {
                         self.export_status = Some(format!(
                             "Wrote video: {} (kept frames)",
@@ -2259,9 +2351,20 @@ Then add that path to your system environment variables (PATH).";
                         self.remove_export_frames(&frames_dir);
                     }
                 }
-                Ok(s) => {
-                    self.export_status = Some(format!("ffmpeg failed: {}", s));
-                    self.append_export_log(&format!("ffmpeg failed: {}", s));
+                Ok(out) => {
+                    let status = out.status;
+                    self.export_status = Some(format!("ffmpeg failed: {}", status));
+                    self.append_export_log(&format!("ffmpeg failed: {}", status));
+                    let stdout = String::from_utf8_lossy(&out.stdout);
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if !stdout.trim().is_empty() {
+                        self.append_export_log("ffmpeg stdout:");
+                        self.append_export_log(stdout.trim());
+                    }
+                    if !stderr.trim().is_empty() {
+                        self.append_export_log("ffmpeg stderr:");
+                        self.append_export_log(stderr.trim());
+                    }
                 }
                 Err(e) => {
                     self.export_status = Some(format!("ffmpeg error: {e}"));
@@ -2308,7 +2411,8 @@ Then add that path to your system environment variables (PATH).";
         self.append_export_log("Export cancelled.");
         if self.export_pending_frames == 0 {
             self.export_cancelled = false;
-            self.remove_export_frames(&self.export_dir);
+            let frames_dir = self.export_dir.clone();
+            self.remove_export_frames(&frames_dir);
             self.remove_export_output();
         }
     }
@@ -2376,7 +2480,8 @@ Then add that path to your system environment variables (PATH).";
         }
         if self.export_cancelled && self.export_pending_frames == 0 {
             self.export_cancelled = false;
-            self.remove_export_frames(&self.export_dir);
+            let frames_dir = self.export_dir.clone();
+            self.remove_export_frames(&frames_dir);
             self.remove_export_output();
         }
     }
@@ -2414,10 +2519,15 @@ Then add that path to your system environment variables (PATH).";
         }
     }
 
-    fn render_export_frame(&mut self, size: [u32; 2], path: &Path) -> Result<(), String> {
+    fn render_export_frame(
+        &mut self,
+        size: [u32; 2],
+        path: &Path,
+        use_export_bbox: bool,
+    ) -> Result<(), String> {
         let render_state = self
             .render_state
-            .as_ref()
+            .clone()
             .ok_or_else(|| "Render state unavailable for high-quality export.".to_string())?;
         let device = &render_state.device;
         let queue = &render_state.queue;
@@ -2443,33 +2553,40 @@ Then add that path to your system environment variables (PATH).";
 
         let viewport_px = [size[0] as f32, size[1] as f32];
         let mut view_camera = self.camera;
-        if let Some(bbox) = self.export_fit_bbox(&ds) {
-            let mut cam = Camera2D::default();
-            cam.fit_bbox(bbox, viewport_px, 0.98);
-            view_camera = cam;
+        if use_export_bbox {
+            if let Some(bbox) = self.export_fit_bbox(&ds) {
+                let mut cam = Camera2D::default();
+                cam.fit_bbox(bbox, viewport_px, 0.98);
+                view_camera = cam;
+            }
         }
         let (active_from, active_to, color_from, color_to, segment_t, _seg_idx) =
             self.current_segment(&ds);
         let from_space = active_from as u32;
         let to_space = active_to as u32;
-        let (from_center, from_scale, to_center, to_scale) = {
-            let from = ds
-                .meta
-                .spaces
-                .get(active_from)
-                .map(|space| self.space_transform(&ds, active_from, space))
-                .unwrap_or(([0.0, 0.0], 1.0));
-            let to = ds
-                .meta
-                .spaces
-                .get(active_to)
-                .map(|space| self.space_transform(&ds, active_to, space))
-                .unwrap_or(([0.0, 0.0], 1.0));
-            (from.0, from.1, to.0, to.1)
+        let (from_center, from_scale) = if let Some(space) = ds.meta.spaces.get(active_from) {
+            self.space_transform(&ds, active_from, space)
+        } else {
+            ([0.0, 0.0], 1.0)
+        };
+        let (to_center, to_scale) = if let Some(space) = ds.meta.spaces.get(active_to) {
+            self.space_transform(&ds, active_to, space)
+        } else {
+            ([0.0, 0.0], 1.0)
         };
 
         let t_eased = apply_ease(segment_t, self.ease_mode);
         let color_t = if color_from != color_to { t_eased } else { 0.0 };
+        let mut point_radius_px = self.point_radius_px;
+        if self.last_viewport_points.width() > 0.0 {
+            let ppp = self.last_viewport_px[0] / self.last_viewport_points.width();
+            point_radius_px *= ppp;
+        }
+        if self.last_viewport_px[0] > 0.0 && self.last_viewport_px[1] > 0.0 {
+            let scale_x = size[0] as f32 / self.last_viewport_px[0];
+            let scale_y = size[1] as f32 / self.last_viewport_px[1];
+            point_radius_px *= scale_x.min(scale_y);
+        }
         let uniforms = Uniforms {
             viewport_px,
             _pad0: [0.0; 2],
@@ -2477,8 +2594,8 @@ Then add that path to your system environment variables (PATH).";
             _pad1: [0.0; 2],
             pixels_per_unit: view_camera.pixels_per_unit,
             t: t_eased,
-            point_radius_px: self.point_radius_px,
-            mask_mode: if self.fast_render { 0.0 } else { 1.0 },
+            point_radius_px,
+            mask_mode: 1.0,
             color_t,
             _pad2: 0.0,
             _pad2b: [0.0; 2],
@@ -2490,10 +2607,18 @@ Then add that path to your system environment variables (PATH).";
             _pad4: 0.0,
         };
 
-        let gpu = if let Some(gpu) = self.offscreen_gpu.as_mut() {
-            gpu
+        let sample_count = 4u32;
+        let use_msaa = sample_count > 1;
+        let gpu = if use_msaa {
+            if self.offscreen_gpu_msaa.is_none() {
+                self.offscreen_gpu_msaa =
+                    Some(PointCloudGpu::new_with_sample_count(device, target_format, sample_count));
+            }
+            self.offscreen_gpu_msaa.as_mut().unwrap()
         } else {
-            self.offscreen_gpu = Some(PointCloudGpu::new(device, target_format));
+            if self.offscreen_gpu.is_none() {
+                self.offscreen_gpu = Some(PointCloudGpu::new(device, target_format));
+            }
             self.offscreen_gpu.as_mut().unwrap()
         };
         let _ = gpu.prepare(
@@ -2517,8 +2642,8 @@ Then add that path to your system environment variables (PATH).";
             uniforms,
         );
 
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("export_frame"),
+        let resolve_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("export_frame_resolve"),
             size: wgpu::Extent3d {
                 width: size[0],
                 height: size[1],
@@ -2531,7 +2656,29 @@ Then add that path to your system environment variables (PATH).";
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             view_formats: &[],
         });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let resolve_view = resolve_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let msaa_texture = if use_msaa {
+            Some(device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("export_frame_msaa"),
+                size: wgpu::Extent3d {
+                    width: size[0],
+                    height: size[1],
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count,
+                dimension: wgpu::TextureDimension::D2,
+                format: target_format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            }))
+        } else {
+            None
+        };
+        let msaa_view = msaa_texture
+            .as_ref()
+            .map(|tex| tex.create_view(&wgpu::TextureViewDescriptor::default()));
+        let color_view = msaa_view.as_ref().unwrap_or(&resolve_view);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("export_encoder"),
         });
@@ -2546,11 +2693,12 @@ Then add that path to your system environment variables (PATH).";
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("export_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: color_view,
+                    depth_slice: None,
+                    resolve_target: if use_msaa { Some(&resolve_view) } else { None },
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(clear),
-                        store: true,
+                        store: wgpu::StoreOp::Store,
                     },
                 })],
                 depth_stencil_attachment: None,
@@ -2572,18 +2720,18 @@ Then add that path to your system environment variables (PATH).";
             mapped_at_creation: false,
         });
         encoder.copy_texture_to_buffer(
-            wgpu::ImageCopyTexture {
-                texture: &texture,
+            wgpu::TexelCopyTextureInfo {
+                texture: &resolve_texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            wgpu::ImageCopyBuffer {
+            wgpu::TexelCopyBufferInfo {
                 buffer: &output_buffer,
-                layout: wgpu::ImageDataLayout {
+                layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(std::num::NonZeroU32::new(padded_bytes_per_row).unwrap()),
-                    rows_per_image: Some(std::num::NonZeroU32::new(size[1]).unwrap()),
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(size[1]),
                 },
             },
             wgpu::Extent3d {
@@ -2599,7 +2747,7 @@ Then add that path to your system environment variables (PATH).";
         buffer_slice.map_async(wgpu::MapMode::Read, move |v| {
             let _ = sender.send(v);
         });
-        device.poll(wgpu::Maintain::Wait);
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
         receiver
             .recv()
             .map_err(|_| "Failed to read export buffer.".to_string())?
@@ -2805,15 +2953,16 @@ Then add that path to your system environment variables (PATH).";
                 let max_height = row_height * 6.0 + 8.0;
                 egui::ScrollArea::vertical()
                     .max_height(max_height)
-                    .stick_to_bottom(true)
+                    .stick_to_bottom(self.convert_running)
                     .show(ui, |ui| {
-                    ui.add(
-                        egui::TextEdit::multiline(&mut self.convert_log_text)
-                            .desired_rows(6)
-                            .interactive(true)
-                            .desired_width(f32::INFINITY),
-                    );
-                });
+                        ui.add(
+                            egui::TextEdit::multiline(&mut self.convert_log_text)
+                                .desired_rows(6)
+                                .interactive(true)
+                                .cursor_at_end(true)
+                                .desired_width(f32::INFINITY),
+                        );
+                    });
             });
 
         ui.separator();
@@ -2916,6 +3065,25 @@ Then add that path to your system environment variables (PATH).";
                 }
             }
         });
+        ui.horizontal(|ui| {
+            if Self::is_wsl() {
+                self.viewport_fullscreen = false;
+                ui.add_enabled(
+                    false,
+                    egui::Checkbox::new(&mut self.viewport_fullscreen, "Viewport fullscreen"),
+                )
+                .on_hover_text("Fullscreen is not supported on WSL.");
+            } else {
+                let changed = ui
+                    .checkbox(&mut self.viewport_fullscreen, "Viewport fullscreen")
+                    .changed();
+                if changed {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(
+                        self.viewport_fullscreen,
+                    ));
+                }
+            }
+        });
 
         ui.separator();
         ui.label("Loaded dataset");
@@ -3010,6 +3178,57 @@ Then add that path to your system environment variables (PATH).";
                 .changed()
             {
                 grid_changed = true;
+            }
+
+            ui.checkbox(&mut self.sample_grid_labels_enabled, "Show sample labels");
+            if self.sample_grid_labels_enabled {
+                let label_mode = match self.sample_grid_label_mode {
+                    SampleGridLabelMode::Default => "Sample (default)",
+                    SampleGridLabelMode::Custom => "Custom labels",
+                };
+                egui::ComboBox::from_label("Label source")
+                    .selected_text(label_mode)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.sample_grid_label_mode,
+                            SampleGridLabelMode::Default,
+                            "Sample (default)",
+                        );
+                        ui.selectable_value(
+                            &mut self.sample_grid_label_mode,
+                            SampleGridLabelMode::Custom,
+                            "Custom labels",
+                        );
+                    });
+
+                if self.sample_grid_label_mode == SampleGridLabelMode::Custom {
+                    if let Some(obs_idx) = self.sample_grid_obs_idx {
+                        if let Ok((_name, _labels, categories, _pal)) =
+                            ds.obs_categorical(obs_idx)
+                        {
+                            if categories.len() <= MAX_GRID_CATEGORIES {
+                                self.ensure_sample_grid_custom_labels(obs_idx, &categories);
+                                if ui.button("Clear custom labels").clicked() {
+                                    self.sample_grid_custom_labels = categories.to_vec();
+                                }
+                                egui::ScrollArea::vertical()
+                                    .max_height(140.0)
+                                    .show(ui, |ui| {
+                                        for (i, cat) in categories.iter().enumerate() {
+                                            ui.horizontal(|ui| {
+                                                ui.label(cat);
+                                                if let Some(val) =
+                                                    self.sample_grid_custom_labels.get_mut(i)
+                                                {
+                                                    ui.text_edit_singleline(val);
+                                                }
+                                            });
+                                        }
+                                    });
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -3531,8 +3750,9 @@ Then add that path to your system environment variables (PATH).";
             if ui.button("Screenshot").clicked() {
                 let ts = chrono_like_timestamp();
                 let path = self.screenshot_dir.join(format!("stviz-animate_screenshot_{ts}.png"));
-                let crop = Self::viewport_crop_px(self.last_viewport_points, ctx.pixels_per_point());
-                self.request_screenshot(ctx, path, crop, false);
+                if let Err(err) = self.render_export_frame(SCREENSHOT_RESOLUTION, &path, false) {
+                    self.export_status = Some(format!("Screenshot failed: {err}"));
+                }
             }
             ui.add_space(6.0);
             ui.label("Loop export");
@@ -3568,6 +3788,33 @@ Then add that path to your system environment variables (PATH).";
                             &mut self.export_quality,
                             ExportQuality::UltraHd,
                             "4K (3840x2160)",
+                        );
+                    });
+            });
+            ui.horizontal(|ui| {
+                ui.label("Encoding");
+                let label = match self.export_video_quality {
+                    ExportVideoQuality::Standard => "Standard (CRF 23, yuv420p)",
+                    ExportVideoQuality::High => "High (CRF 18, yuv420p)",
+                ExportVideoQuality::Ultra => "Ultra (CRF 14, yuv420p)",
+            };
+                egui::ComboBox::from_id_salt("export_video_quality")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.export_video_quality,
+                            ExportVideoQuality::Standard,
+                            "Standard (CRF 23, yuv420p)",
+                        );
+                        ui.selectable_value(
+                            &mut self.export_video_quality,
+                            ExportVideoQuality::High,
+                            "High (CRF 18, yuv420p)",
+                        );
+                        ui.selectable_value(
+                            &mut self.export_video_quality,
+                            ExportVideoQuality::Ultra,
+                            "Ultra (CRF 14, yuv420p)",
                         );
                     });
             });
@@ -3617,15 +3864,31 @@ Then add that path to your system environment variables (PATH).";
             }
             if !self.export_log_text.trim().is_empty() {
                 ui.separator();
+                let mut log_rect = None;
+                let open_override = if self.export_log_open { Some(true) } else { None };
                 egui::CollapsingHeader::new("Export log")
-                    .default_open(false)
+                    .open(open_override)
                     .show(ui, |ui| {
-                        ui.add(
+                        if ui.button("Copy log").clicked() {
+                            ui.ctx().copy_text(self.export_log_text.clone());
+                        }
+                        let response = ui.add(
                             egui::TextEdit::multiline(&mut self.export_log_text)
                                 .desired_rows(6)
-                                .interactive(false),
+                                .cursor_at_end(true)
+                                .interactive(true),
                         );
+                        log_rect = Some(response);
                     });
+                if self.export_log_open {
+                    self.export_log_open = false;
+                }
+                if self.export_log_focus {
+                    if let Some(response) = log_rect {
+                        response.scroll_to_me(Some(egui::Align::BOTTOM));
+                    }
+                    self.export_log_focus = false;
+                }
             }
         });
     }
@@ -3738,23 +4001,10 @@ Then add that path to your system environment variables (PATH).";
         // Update uniforms for this viewport
         let ppp = ctx.pixels_per_point();
         let viewport_px = [rect.width() * ppp, rect.height() * ppp];
+        self.last_viewport_px = viewport_px;
 
         let ds_opt = self.dataset.clone();
-        let mut view_camera = self.camera;
-        if self.exporting_loop {
-            if self.export_camera.is_none() {
-                if let Some(ds) = ds_opt.as_ref() {
-                    if let Some(bbox) = self.export_fit_bbox(ds) {
-                        let mut cam = Camera2D::default();
-                        cam.fit_bbox(bbox, viewport_px, 0.98);
-                        self.export_camera = Some(cam);
-                    }
-                }
-            }
-            if let Some(cam) = self.export_camera {
-                view_camera = cam;
-            }
-        }
+        let view_camera = self.camera;
         let (active_from, active_to, color_from, color_to, segment_t, seg_idx) =
             if let Some(ds) = ds_opt.as_ref() {
                 self.current_segment(ds)
@@ -3904,7 +4154,7 @@ Then add that path to your system environment variables (PATH).";
         if self.exporting_loop && self.export_total_frames > 0 {
             let path = self.export_dir.join(format!("frame_{:06}.png", self.export_frame_index));
             if let Some(res) = self.export_resolution {
-                if let Err(err) = self.render_export_frame(res, &path) {
+                if let Err(err) = self.render_export_frame(res, &path, true) {
                     self.append_export_log(&format!("Export render failed: {err}"));
                     self.export_status = Some(format!("Export failed: {err}"));
                     self.exporting_loop = false;
@@ -4001,11 +4251,24 @@ Then add that path to your system environment variables (PATH).";
         [-hw, -hh, hw, hh]
     }
 
-    fn grid_positions_for(&mut self, ds: &Dataset, space_idx: usize) -> Option<(Arc<Vec<f32>>, [f32; 4])> {
+    fn grid_positions_for(
+        &mut self,
+        ds: &Dataset,
+        space_idx: usize,
+    ) -> Option<(Arc<Vec<f32>>, [f32; 4])> {
+        self.grid_positions_for_space(ds, space_idx, false)
+    }
+
+    fn grid_positions_for_space(
+        &mut self,
+        ds: &Dataset,
+        space_idx: usize,
+        allow_non_selected: bool,
+    ) -> Option<(Arc<Vec<f32>>, [f32; 4])> {
         if !self.sample_grid_enabled {
             return None;
         }
-        if self.sample_grid_space_idx != Some(space_idx) {
+        if !allow_non_selected && self.sample_grid_space_idx != Some(space_idx) {
             return None;
         }
         let obs_idx = self.sample_grid_obs_idx?;
@@ -4148,9 +4411,189 @@ Then add that path to your system environment variables (PATH).";
             }
         }
 
+        let is_spatial = ds
+            .meta
+            .spaces
+            .get(space_idx)
+            .map(|s| s.name.eq_ignore_ascii_case("spatial"))
+            .unwrap_or(false);
+        if is_spatial {
+            let mut max_dim = 0.0f32;
+            for space in &ds.meta.spaces {
+                let w = (space.bbox[2] - space.bbox[0]).max(1e-6);
+                let h = (space.bbox[3] - space.bbox[1]).max(1e-6);
+                max_dim = max_dim.max(w.max(h));
+            }
+            let grid_dim = (bbox[2] - bbox[0]).max(1e-6).max((bbox[3] - bbox[1]).max(1e-6));
+            if max_dim > grid_dim {
+                let scale = max_dim / grid_dim;
+                let cx = 0.5 * (bbox[0] + bbox[2]);
+                let cy = 0.5 * (bbox[1] + bbox[3]);
+                bbox = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+                for i in 0..n {
+                    let x = cx + (out[i * 2] - cx) * scale;
+                    let y = cy + (out[i * 2 + 1] - cy) * scale;
+                    out[i * 2] = x;
+                    out[i * 2 + 1] = y;
+                    if x < bbox[0] {
+                        bbox[0] = x;
+                    }
+                    if y < bbox[1] {
+                        bbox[1] = y;
+                    }
+                    if x > bbox[2] {
+                        bbox[2] = x;
+                    }
+                    if y > bbox[3] {
+                        bbox[3] = y;
+                    }
+                }
+            }
+        }
+
         let positions = Arc::new(out);
-        self.grid_cache = Some(GridCache { key, positions: positions.clone(), bbox });
+        self.grid_cache = Some(GridCache {
+            key,
+            positions: positions.clone(),
+            bbox,
+        });
         Some((positions, bbox))
+    }
+
+    fn ensure_sample_grid_custom_labels(&mut self, obs_idx: usize, categories: &[String]) {
+        if self.sample_grid_custom_labels_obs_idx != Some(obs_idx)
+            || self.sample_grid_custom_labels.len() != categories.len()
+        {
+            self.sample_grid_custom_labels_obs_idx = Some(obs_idx);
+            self.sample_grid_custom_labels = categories.to_vec();
+        }
+    }
+
+    fn sample_grid_label_positions(
+        &self,
+        ds: &Dataset,
+    ) -> Option<Vec<(String, [f32; 2])>> {
+        if !self.sample_grid_enabled || !self.sample_grid_labels_enabled {
+            return None;
+        }
+        let space_idx = self.sample_grid_space_idx?;
+        let obs_idx = self.sample_grid_obs_idx?;
+        let (_name, labels, categories, _pal) = ds.obs_categorical(obs_idx).ok()?;
+        if categories.len() > MAX_GRID_CATEGORIES {
+            return None;
+        }
+        let mut selected: Vec<usize> = if self.sample_grid_use_filter {
+            if let Some(state) = self.category_state.get(&obs_idx) {
+                state
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, v)| if *v { Some(i) } else { None })
+                    .collect()
+            } else {
+                (0..categories.len()).collect()
+            }
+        } else {
+            (0..categories.len()).collect()
+        };
+        if selected.is_empty() {
+            selected = (0..categories.len()).collect();
+        }
+
+        let n_sel = selected.len().max(1);
+        let mut map = vec![-1i32; categories.len()];
+        for (i, &cat) in selected.iter().enumerate() {
+            if cat < map.len() {
+                map[cat] = i as i32;
+            }
+        }
+
+        let pos = ds.space_f32_2d(space_idx).ok()?;
+        let n = ds.meta.n_points as usize;
+        if pos.len() != n * 2 {
+            return None;
+        }
+
+        let mut min_xy = vec![[f32::INFINITY; 2]; n_sel];
+        let mut max_xy = vec![[-f32::INFINITY; 2]; n_sel];
+
+        for i in 0..n {
+            let cat = labels.get(i).copied().unwrap_or(0) as usize;
+            if cat >= map.len() {
+                continue;
+            }
+            let si = map[cat];
+            if si < 0 {
+                continue;
+            }
+            let si = si as usize;
+            let x = pos[i * 2];
+            let y = pos[i * 2 + 1];
+            if x < min_xy[si][0] {
+                min_xy[si][0] = x;
+            }
+            if y < min_xy[si][1] {
+                min_xy[si][1] = y;
+            }
+            if x > max_xy[si][0] {
+                max_xy[si][0] = x;
+            }
+            if y > max_xy[si][1] {
+                max_xy[si][1] = y;
+            }
+        }
+
+        let mut max_w = 1e-6f32;
+        let mut max_h = 1e-6f32;
+        for i in 0..n_sel {
+            let min_x = min_xy[i][0];
+            let min_y = min_xy[i][1];
+            let max_x = max_xy[i][0];
+            let max_y = max_xy[i][1];
+            if !min_x.is_finite() || !max_x.is_finite() {
+                continue;
+            }
+            let w = (max_x - min_x).max(1e-6);
+            let h = (max_y - min_y).max(1e-6);
+            max_w = max_w.max(w);
+            max_h = max_h.max(h);
+        }
+
+        let pad = (1.0 + self.sample_grid_padding).max(1.0);
+        let tile_w = max_w * pad;
+        let tile_h = max_h * pad;
+        let cols = (n_sel as f32).sqrt().ceil() as usize;
+        let rows = (n_sel + cols - 1) / cols;
+        let origin_x = -((cols as f32 - 1.0) * 0.5);
+        let origin_y = -((rows as f32 - 1.0) * 0.5);
+
+        let mut offsets = vec![[0.0f32; 2]; n_sel];
+        for i in 0..n_sel {
+            let col = (i % cols) as f32;
+            let row = (i / cols) as f32;
+            offsets[i][0] = (origin_x + col) * tile_w;
+            offsets[i][1] = (origin_y + row) * tile_h;
+        }
+
+        let mut out = Vec::with_capacity(n_sel);
+        for (i, &cat_idx) in selected.iter().enumerate() {
+            let mut label = categories
+                .get(cat_idx)
+                .cloned()
+                .unwrap_or_else(|| format!("Category {}", cat_idx + 1));
+            if self.sample_grid_label_mode == SampleGridLabelMode::Custom
+                && self.sample_grid_custom_labels_obs_idx == Some(obs_idx)
+                && self.sample_grid_custom_labels.len() == categories.len()
+            {
+                if let Some(custom) = self.sample_grid_custom_labels.get(cat_idx) {
+                    if !custom.trim().is_empty() {
+                        label = custom.clone();
+                    }
+                }
+            }
+            let label_pos = [offsets[i][0], offsets[i][1] + tile_h * 0.55];
+            out.push((label, label_pos));
+        }
+        Some(out)
     }
 
     fn ensure_color_path_len(&mut self, len: usize) {
@@ -4500,17 +4943,12 @@ Then add that path to your system environment variables (PATH).";
         )
     }
 
-    fn draw_view_overlays(&self, ui: &egui::Ui, rect: egui::Rect) {
-        if !self.show_axes {
-            return;
-        }
-
+    fn draw_view_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         let painter = ui.painter();
-        let margin = 10.0;
-        let origin = rect.left_bottom() + egui::vec2(margin, -margin);
-        let axis_len = 36.0;
-
         if self.show_axes {
+            let margin = 10.0;
+            let origin = rect.left_bottom() + egui::vec2(margin, -margin);
+            let axis_len = 36.0;
             let x_color = egui::Color32::from_rgb(220, 90, 90);
             let y_color = egui::Color32::from_rgb(90, 220, 140);
 
@@ -4531,7 +4969,73 @@ Then add that path to your system environment variables (PATH).";
                 y_color,
             );
         }
+        if !self.sample_grid_labels_enabled {
+            return;
+        }
+        let Some(ds) = self.dataset.as_ref() else {
+            return;
+        };
+        let (active_from, active_to, _color_from, _color_to, seg_t, _seg_idx) =
+            self.current_segment(ds);
+        let grid_idx = self.sample_grid_space_idx;
+        let show_labels = if let Some(grid_idx) = grid_idx {
+            if active_from == grid_idx && active_to == grid_idx {
+                true
+            } else if active_from == grid_idx && seg_t <= 0.02 {
+                true
+            } else {
+                active_to == grid_idx && seg_t >= 0.98
+            }
+        } else {
+            false
+        };
+        if !show_labels {
+            return;
+        }
+        let Some(labels) = self.sample_grid_label_positions(ds) else {
+            return;
+        };
+        let ppp = ui.ctx().pixels_per_point();
+        let viewport_px = [rect.width() * ppp, rect.height() * ppp];
+        if viewport_px[0] <= 0.0 || viewport_px[1] <= 0.0 {
+            return;
+        }
+        let color = contrast_color(self.background_color);
+        for (label, pos) in labels {
+            let screen_px = [
+                (pos[0] - self.camera.center[0]) * self.camera.pixels_per_unit
+                    + 0.5 * viewport_px[0],
+                (pos[1] - self.camera.center[1]) * self.camera.pixels_per_unit
+                    + 0.5 * viewport_px[1],
+            ];
+            let screen = rect.min
+                + egui::vec2(screen_px[0] / ppp, screen_px[1] / ppp);
+            painter.text(
+                screen,
+                egui::Align2::CENTER_BOTTOM,
+                label,
+                egui::FontId::proportional(12.0),
+                color,
+            );
+        }
 
+    }
+
+    fn viewport_fullscreen_overlay(&mut self, ctx: &egui::Context) {
+        egui::Area::new("viewport_fullscreen_exit".into())
+            .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-12.0, 12.0))
+            .show(ctx, |ui| {
+                let frame = egui::Frame::NONE
+                    .fill(egui::Color32::from_black_alpha(140))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::symmetric(8, 6));
+                frame.show(ui, |ui| {
+                    if ui.button("Exit fullscreen").clicked() {
+                        self.viewport_fullscreen = false;
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
+                    }
+                });
+            });
     }
 
     fn viewport_crop_px(rect: egui::Rect, ppp: f32) -> Option<[u32; 4]> {
@@ -6538,6 +7042,23 @@ impl eframe::App for StvizApp {
         }
         self.maybe_update_playback(ctx);
 
+        if self.viewport_fullscreen {
+            let is_fullscreen = ctx
+                .input(|i| i.viewport().fullscreen)
+                .unwrap_or(false);
+            if !is_fullscreen {
+                self.viewport_fullscreen = false;
+            }
+        }
+
+        if self.viewport_fullscreen {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                self.ui_viewport(ui, ctx);
+            });
+            self.viewport_fullscreen_overlay(ctx);
+            return;
+        }
+
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.label("GPU point transitions");
@@ -6688,7 +7209,11 @@ fn save_color_image_png(
 
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();
 
-    let encoder = image::codecs::png::PngEncoder::new(std::fs::File::create(path)?);
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        std::fs::File::create(path)?,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
     encoder.write_image(&rgba, cw, ch, image::ColorType::Rgba8.into())?;
     Ok(())
 }
@@ -6698,7 +7223,11 @@ fn save_rgba_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::R
 
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();
     let file = std::fs::File::create(path)?;
-    let encoder = image::codecs::png::PngEncoder::new(file);
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        file,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
     encoder.write_image(
         rgba,
         width,

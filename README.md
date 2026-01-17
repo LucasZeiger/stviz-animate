@@ -20,7 +20,7 @@ Windows:
 2) Extract it.
 3) Run `stviz-animate.exe`.
 
-NB: There will be a trusted developer warning message, which you can ignore.
+Ignore the trusted developer warning message.
 
 Linux (Ubuntu):
 1) Download the `stviz-animate-ubuntu.tar.gz` from GitHub Releases.
@@ -35,7 +35,6 @@ Linux (Ubuntu):
 
 ### Windows
 
-Manual install
 
 1) Install Rust (stable) and Visual Studio Build Tools.
 2) Run:
@@ -78,8 +77,9 @@ python python/export_stviz.py --input your_data.h5ad --output your_data.stviz
 Requires Python 3.8+.
 
 ## Export
-- Screenshot: saves a PNG to `output/`.
-- Loop export: writes an MP4 to `output/`, with configurable fps, duration, and quality.
+- Screenshot: saves a PNG to `output/` at 4K (3840x2160).
+- Loop export: writes an MP4 to `output/`, with configurable fps, duration, and quality (Current viewport, 1080p, 4K).
+- Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
 - ffmpeg is preferred. If missing, OpenCV is used as a fallback (installed into `.stviz_venv` on first use).
 
 ## Packaging
