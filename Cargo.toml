@@ -4,6 +4,15 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Lucas Zeiger"]
+build = "build.rs"
+
+[package.metadata.bundle]
+name = "stviz-animate"
+identifier = "com.lucaszeiger.stviz-animate"
+category = "public.app-category.graphics-design"
+short_description = "GPU-accelerated viewer for large single-cell / spatial transcriptomics point clouds."
+icon = ["assets/icon.icns"]
+resources = ["python"]
 
 [dependencies]
 anyhow = "1.0"
@@ -16,5 +25,13 @@ memmap2 = "0.9"
 parking_lot = "0.12"
 rand = "0.8"
 rfd = "0.17.1"
+raw-window-handle = "0.6"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Graphics_Gdi"] }
+
+[build-dependencies]
+embed-resource = "2.4"
+image = "0.25"
