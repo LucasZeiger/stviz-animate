@@ -33,6 +33,26 @@ Linux (Ubuntu):
    ./stviz-animate/stviz-animate
    ```
 
+Make sure to look at the docs for more information on how to use stviz-animate.
+
+## Data conversion (.h5ad -> .stviz)
+- Drag a `.h5ad` file into the conversion box, or click it to pick a file.
+- The converter creates a private Python venv in `.stviz_venv` as needed.
+- Important: This requires Python 3.8+ to be present on your system and as a system Path.
+
+Manual conversion:
+
+```bash
+python -m pip install -U anndata h5py numpy pandas scipy
+python python/export_stviz.py --input your_data.h5ad --output your_data.stviz
+```
+
+## Export
+- Screenshot: saves a PNG to `output/` at 4K (3840x2160).
+- Loop export: writes an MP4 to `output/`, with configurable fps, duration, and quality (Current viewport, 1080p, 4K).
+- Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
+- ffmpeg is preferred. If missing, OpenCV is used as a fallback (installed into `.stviz_venv` on first use).
+
 ### Windows
 
 
@@ -62,25 +82,6 @@ sudo apt-get update
 sudo apt-get install -y libgtk-3-dev
 cargo run --release
 ```
-
-## Data conversion (.h5ad -> .stviz)
-- Drag a `.h5ad` file into the app or click the conversion box to pick a file.
-- The converter creates a private Python venv in `.stviz_venv` as needed.
-
-Manual conversion:
-
-```bash
-python -m pip install -U anndata h5py numpy pandas scipy
-python python/export_stviz.py --input your_data.h5ad --output your_data.stviz
-```
-
-Requires Python 3.8+.
-
-## Export
-- Screenshot: saves a PNG to `output/` at 4K (3840x2160).
-- Loop export: writes an MP4 to `output/`, with configurable fps, duration, and quality (Current viewport, 1080p, 4K).
-- Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
-- ffmpeg is preferred. If missing, OpenCV is used as a fallback (installed into `.stviz_venv` on first use).
 
 ## Packaging
 Scripts to produce portable bundles:
