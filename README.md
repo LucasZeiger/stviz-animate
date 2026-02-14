@@ -6,9 +6,9 @@ Animate transitions between coordinate spaces (spatial, UMAP, tSNE, PCA, ...), a
 ## Highlights
 - Fast GPU rendering for large datasets.
 - Timeline keyframes with easing, color paths, and playback modes.
-- Advanced timeline canvas for fine-grained sequencing and filtering (beta).
-- Loop video export with quality presets (Current viewport, 1080p, 4K).
-- Mock dataset generator for quick demos. The mock data generation needs some more work to look more tissue - like and potentially have other presets, but works for now.
+- Advanced timeline canvas for fine-grained sequencing and filtering (not fully fleshed out).
+- Loop video export with quality presets (e.g. 1080p, 4K).
+- Mock dataset generator for quick demos. The mock data generation needs some more work to look more like real tissue and potentially have other presets, but works for now.
 - Built-in .h5ad -> .stviz converter (runs in an app-managed user-data venv).
 
 ## Quick start
@@ -20,7 +20,7 @@ Windows:
 2) Extract it.
 3) Run `stviz-animate.exe`.
 
-Ignore the trusted developer warning message.
+Ignore the trusted developer warning message if it shows up.
 
 Linux (Ubuntu):
 1) Download the `stviz-animate-ubuntu.tar.gz` from GitHub Releases.
@@ -33,8 +33,7 @@ Linux (Ubuntu):
    ./stviz-animate/stviz-animate
    ```
 
-### Windows
-
+### Building it on Windows
 
 1) Install Rust (stable) and Visual Studio Build Tools.
 2) Run:
