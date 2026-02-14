@@ -940,6 +940,8 @@ def make_master_mock_spatial(
 ) -> ad.AnnData:
     if n_cells < 10_000 or n_cells > 10_000_000:
         raise ValueError("n_cells must be between 10,000 and 10,000,000.")
+    if not 0.0 <= expr_density <= 1.0:
+        raise ValueError("expr_density must be in [0.0, 1.0].")
     if seed is None:
         seed = int(np.random.SeedSequence().entropy)
     rng = np.random.default_rng(seed)
@@ -1315,11 +1317,18 @@ def main() -> None:
     ap.add_argument("--cells", type=int, default=500_000)
     ap.add_argument("--embeddings", type=int, default=10)
     ap.add_argument("--genes", type=int, default=50)
-    ap.add_argument("--density", type=float, default=10.0)
+    ap.add_argument(
+        "--density",
+        type=float,
+        default=0.15,
+        help="Expression sparsity probability in [0, 1] (default: 0.15).",
+    )
     ap.add_argument("--cell-types", type=int, default=12)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--no-expr", action="store_true", help="Skip expression matrix.")
     args = ap.parse_args()
+    if not 0.0 <= args.density <= 1.0:
+        ap.error("--density must be in [0, 1].")
 
     adata = make_master_mock_spatial(
         n_cells=args.cells,

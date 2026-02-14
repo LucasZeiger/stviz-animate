@@ -23,6 +23,7 @@ const MAX_GRID_CATEGORIES: usize = 512;
 const ADVANCED_VIEW_FPS_CAP_HZ: f32 = 60.0;
 const MIN_PYTHON_VERSION: (u32, u32) = (3, 8);
 const SCREENSHOT_RESOLUTION: [u32; 2] = [3840, 2160];
+const APP_DATA_DIR_NAME: &str = "stviz-animate";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExportQuality {
@@ -96,8 +97,13 @@ pub struct StvizApp {
 
     // Screenshot / export
     project_dir: PathBuf,
+    app_data_dir: PathBuf,
     output_dir: PathBuf,
+    logs_dir: PathBuf,
+    export_root_dir: PathBuf,
+    converter_venv_dir: PathBuf,
     screenshot_dir: PathBuf,
+    screenshot_name: String,
     exporting_loop: bool,
     export_fps: u32,
     export_duration_sec: f32,
@@ -107,6 +113,7 @@ pub struct StvizApp {
     export_dir: PathBuf,
     export_name: String,
     export_output_path: Option<PathBuf>,
+    export_temp_output_path: Option<PathBuf>,
     export_total_frames: u32,
     export_frame_index: u32,
     export_status: Option<String>,
@@ -302,6 +309,7 @@ struct GridCacheKey {
     space_idx: usize,
     obs_idx: usize,
     use_filter: bool,
+    filter_sig: u64,
     version: u64,
 }
 
@@ -318,6 +326,7 @@ struct AdvancedCardFilter {
     cached_indices: Option<Arc<Vec<u32>>>,
     cached_indices_id: u64,
     cached_dataset_id: u64,
+    cached_max_draw: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -380,8 +389,21 @@ impl StvizApp {
         let cpu_adapter = matches!(adapter_info.device_type, wgpu::DeviceType::Cpu);
 
         let project_dir = Self::resolve_project_dir();
-        let output_dir = project_dir.join("output");
+        let mut app_data_dir = Self::resolve_app_data_dir();
+        if std::fs::create_dir_all(&app_data_dir).is_err() {
+            app_data_dir = std::env::temp_dir().join(APP_DATA_DIR_NAME);
+            let _ = std::fs::create_dir_all(&app_data_dir);
+        }
+        let output_dir = app_data_dir.join("output");
+        let logs_dir = app_data_dir.join("logs");
+        let export_root_dir = output_dir.join("exports");
+        let screenshot_dir = output_dir.join("screenshots");
+        let converter_venv_dir = app_data_dir.join(".stviz_venv");
         let _ = std::fs::create_dir_all(&output_dir);
+        let _ = std::fs::create_dir_all(&logs_dir);
+        let _ = std::fs::create_dir_all(&export_root_dir);
+        let _ = std::fs::create_dir_all(&screenshot_dir);
+        let _ = std::fs::create_dir_all(&converter_venv_dir);
         Self::cleanup_mock_artifacts(&output_dir);
         let ffmpeg_path = Self::resolve_ffmpeg_path(&project_dir);
 
@@ -437,17 +459,23 @@ impl StvizApp {
             draw_indices: Arc::new(Vec::new()),
 
             project_dir: project_dir.clone(),
+            app_data_dir: app_data_dir.clone(),
             output_dir: output_dir.clone(),
-            screenshot_dir: output_dir.clone(),
+            logs_dir: logs_dir.clone(),
+            export_root_dir: export_root_dir.clone(),
+            converter_venv_dir: converter_venv_dir.clone(),
+            screenshot_dir: screenshot_dir.clone(),
+            screenshot_name: String::from("stviz-animate_screenshot"),
             exporting_loop: false,
             export_fps: 30,
             export_duration_sec: 5.0,
             export_quality: ExportQuality::Current,
             export_resolution: None,
             export_video_quality: ExportVideoQuality::High,
-            export_dir: output_dir.clone(),
+            export_dir: export_root_dir.clone(),
             export_name: String::from("stviz-animate_loop.mp4"),
             export_output_path: None,
+            export_temp_output_path: None,
             export_total_frames: 0,
             export_frame_index: 0,
             export_status: None,
@@ -539,7 +567,8 @@ impl StvizApp {
         if app.fullscreen {
             app.apply_fullscreen(&cc.egui_ctx);
         } else {
-            cc.egui_ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
         }
         app
     }
@@ -565,8 +594,7 @@ impl StvizApp {
     }
 
     fn is_wsl() -> bool {
-        std::env::var_os("WSL_DISTRO_NAME").is_some()
-            || std::env::var_os("WSL_INTEROP").is_some()
+        std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some()
     }
 
     fn update_main_view_refresh(&mut self, ctx: &egui::Context, _frame: &eframe::Frame) {
@@ -664,7 +692,9 @@ impl StvizApp {
                 .map(|p| p.to_vec())
                 .unwrap_or_else(|| categorical_palette_named("tableau10", categories_len)),
             CategoricalPalette::Turbo => categorical_palette(categories_len),
-            other => categorical_palette_named(Self::categorical_palette_name(other), categories_len),
+            other => {
+                categorical_palette_named(Self::categorical_palette_name(other), categories_len)
+            }
         };
         let mut out = base;
         if let Some(overrides) = self.category_overrides.get(&obs_idx) {
@@ -746,18 +776,18 @@ impl StvizApp {
             if let Some(idx) = find_space_by_name(&ds, "spatial") {
                 push_unique(idx);
             }
-            if let Some(idx) = find_space_by_name(&ds, "x_pca")
-                .or_else(|| find_space_by_name(&ds, "pca"))
+            if let Some(idx) =
+                find_space_by_name(&ds, "x_pca").or_else(|| find_space_by_name(&ds, "pca"))
             {
                 push_unique(idx);
             }
-            if let Some(idx) = find_space_by_name(&ds, "x_umap")
-                .or_else(|| find_space_by_name(&ds, "umap"))
+            if let Some(idx) =
+                find_space_by_name(&ds, "x_umap").or_else(|| find_space_by_name(&ds, "umap"))
             {
                 push_unique(idx);
             }
-            if let Some(idx) = find_space_by_name(&ds, "x_tsne")
-                .or_else(|| find_space_by_name(&ds, "tsne"))
+            if let Some(idx) =
+                find_space_by_name(&ds, "x_tsne").or_else(|| find_space_by_name(&ds, "tsne"))
             {
                 push_unique(idx);
             }
@@ -791,13 +821,12 @@ impl StvizApp {
                 }
                 if let Some(space) = ds.meta.spaces.get(space_idx) {
                     let bbox = self.space_bbox_for_view(&ds, space_idx, space);
-                    let viewport_px = if self.last_viewport_px[0] > 0.0
-                        && self.last_viewport_px[1] > 0.0
-                    {
-                        self.last_viewport_px
-                    } else {
-                        [1000.0, 700.0]
-                    };
+                    let viewport_px =
+                        if self.last_viewport_px[0] > 0.0 && self.last_viewport_px[1] > 0.0 {
+                            self.last_viewport_px
+                        } else {
+                            [1000.0, 700.0]
+                        };
                     self.camera.fit_bbox(bbox, viewport_px, 0.9);
                 }
             }
@@ -806,7 +835,13 @@ impl StvizApp {
         self.sample_grid_obs_idx = find_obs_by_name(&ds, "sample");
         self.sample_grid_space_idx = find_space_by_name(&ds, "spatial")
             .or_else(|| find_space_by_name(&ds, "centroid"))
-            .or_else(|| if ds.meta.spaces.is_empty() { None } else { Some(0) });
+            .or_else(|| {
+                if ds.meta.spaces.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }
+            });
         self.grid_cache = None;
         self.grid_version = self.grid_version.wrapping_add(1);
         self.sample_grid_custom_labels.clear();
@@ -861,20 +896,24 @@ impl StvizApp {
                     }
                 }
                 if cat_idx.is_none() {
-                // fallback: all white
-                self.colors_rgba8 = Arc::new(vec![pack_rgba8(255, 255, 255, 255); n]);
-                self.colors_opaque = true;
-                self.colors_id = self.next_color_id();
-                self.legend_range = None;
-                let _ = self.recompute_draw_indices_with_filters();
+                    // fallback: all white
+                    self.colors_rgba8 = Arc::new(vec![pack_rgba8(255, 255, 255, 255); n]);
+                    self.colors_opaque = true;
+                    self.colors_id = self.next_color_id();
+                    self.legend_range = None;
+                    let _ = self.recompute_draw_indices_with_filters();
                     return Ok(());
                 }
-                if !matches!(ds.meta.obs[self.active_obs_idx], ObsMeta::Categorical { .. }) {
+                if !matches!(
+                    ds.meta.obs[self.active_obs_idx],
+                    ObsMeta::Categorical { .. }
+                ) {
                     self.active_obs_idx = cat_idx.unwrap();
                     self.load_filter_state(&ds);
                 }
 
-                let (_name, labels, categories, pal_opt) = ds.obs_categorical(self.active_obs_idx)?;
+                let (_name, labels, categories, pal_opt) =
+                    ds.obs_categorical(self.active_obs_idx)?;
                 let too_many = categories.len() > MAX_FILTER_CATEGORIES;
                 let pal: Vec<u32> = if too_many {
                     categorical_palette(256)
@@ -893,9 +932,13 @@ impl StvizApp {
                     let li = lab as usize;
                     let c = if too_many {
                         let idx = if pal.is_empty() { 0 } else { li % pal.len() };
-                        pal.get(idx).copied().unwrap_or(pack_rgba8(200, 200, 200, 255))
+                        pal.get(idx)
+                            .copied()
+                            .unwrap_or(pack_rgba8(200, 200, 200, 255))
                     } else {
-                        pal.get(li).copied().unwrap_or(pack_rgba8(200, 200, 200, 255))
+                        pal.get(li)
+                            .copied()
+                            .unwrap_or(pack_rgba8(200, 200, 200, 255))
                     };
                     if (c >> 24) & 0xFF != 255 {
                         opaque = false;
@@ -952,7 +995,7 @@ impl StvizApp {
                 }
                 let colors = gradient_map(vals, vmin, vmax, &colorous::VIRIDIS);
                 self.colors_rgba8 = Arc::new(colors);
-                self.colors_opaque = true;
+                self.colors_opaque = vals.iter().all(|v| v.is_finite());
                 self.colors_id = self.next_color_id();
                 self.legend_range = Some(LegendRange {
                     label: name.to_string(),
@@ -993,7 +1036,10 @@ impl StvizApp {
         let Some(ds) = self.dataset.as_ref() else {
             return Ok(());
         };
-        if !matches!(ds.meta.obs[self.active_obs_idx], ObsMeta::Categorical { .. }) {
+        if !matches!(
+            ds.meta.obs[self.active_obs_idx],
+            ObsMeta::Categorical { .. }
+        ) {
             return self.recompute_draw_indices_with_filters();
         }
 
@@ -1022,8 +1068,10 @@ impl StvizApp {
         };
         let n = ds.meta.n_points as usize;
         if self.active_filters.is_empty() {
-            if matches!(ds.meta.obs.get(self.active_obs_idx), Some(ObsMeta::Categorical { .. }))
-                && !self.enabled_categories.is_empty()
+            if matches!(
+                ds.meta.obs.get(self.active_obs_idx),
+                Some(ObsMeta::Categorical { .. })
+            ) && !self.enabled_categories.is_empty()
                 && self.enabled_categories.iter().all(|v| !*v)
             {
                 self.base_indices.clear();
@@ -1076,6 +1124,22 @@ impl StvizApp {
         Ok(())
     }
 
+    fn clear_all_filters(&mut self, ds: &Dataset) {
+        self.active_filters.clear();
+        self.category_state.clear();
+        self.filter_popup_open = false;
+        if let Ok((_name, _labels, categories, _pal)) = ds.obs_categorical(self.active_obs_idx) {
+            if categories.len() <= MAX_FILTER_CATEGORIES {
+                self.enabled_categories = vec![true; categories.len()];
+            } else {
+                self.enabled_categories.clear();
+            }
+        } else {
+            self.enabled_categories.clear();
+        }
+        let _ = self.recompute_draw_indices_with_filters();
+    }
+
     fn downsample_indices(max_draw: usize, indices: &[u32]) -> Vec<u32> {
         if max_draw == 0 || indices.len() <= max_draw {
             return indices.to_vec();
@@ -1093,9 +1157,32 @@ impl StvizApp {
         out
     }
 
-    fn filter_signature(dataset_id: u64, obs_idx: usize, enabled: &[bool]) -> u64 {
+    fn sample_grid_filter_signature(&self, obs_idx: usize) -> u64 {
+        if !self.sample_grid_use_filter {
+            return 0;
+        }
+        let Some(enabled) = self.category_state.get(&obs_idx) else {
+            return 0;
+        };
+        Self::advanced_filter_signature(0, obs_idx, 0, enabled)
+    }
+
+    fn sample_grid_override_id(&self, space_idx: usize, obs_idx: usize) -> u64 {
+        self.grid_version
+            ^ ((space_idx as u64) << 32)
+            ^ self.sample_grid_filter_signature(obs_idx)
+            ^ (obs_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+
+    fn advanced_filter_signature(
+        dataset_id: u64,
+        obs_idx: usize,
+        max_draw: usize,
+        enabled: &[bool],
+    ) -> u64 {
         let mut hash = 1469598103934665603u64 ^ dataset_id.wrapping_mul(1099511628211);
-        hash ^= obs_idx as u64;
+        hash ^= (obs_idx as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        hash ^= (max_draw as u64).wrapping_mul(0x517C_C1B7_2722_0A95);
         for (i, enabled) in enabled.iter().enumerate() {
             let v = if *enabled { 1u64 } else { 0u64 };
             hash = hash
@@ -1111,7 +1198,12 @@ impl StvizApp {
         max_draw: usize,
         dataset_id: u64,
     ) -> Option<(Arc<Vec<u32>>, u64)> {
-        if filter.cached_dataset_id == dataset_id {
+        let requested_sig =
+            Self::advanced_filter_signature(dataset_id, filter.obs_idx, max_draw, &filter.enabled);
+        if filter.cached_dataset_id == dataset_id
+            && filter.cached_max_draw == max_draw
+            && filter.cached_indices_id == requested_sig
+        {
             if let Some(indices) = filter.cached_indices.clone() {
                 return Some((indices, filter.cached_indices_id));
             }
@@ -1136,11 +1228,13 @@ impl StvizApp {
             }
         }
         let out = Self::downsample_indices(max_draw, &idx);
-        let sig = Self::filter_signature(dataset_id, filter.obs_idx, &filter.enabled);
+        let sig =
+            Self::advanced_filter_signature(dataset_id, filter.obs_idx, max_draw, &filter.enabled);
         let arc = Arc::new(out);
         filter.cached_indices = Some(arc.clone());
         filter.cached_indices_id = sig;
         filter.cached_dataset_id = dataset_id;
+        filter.cached_max_draw = max_draw;
         Some((arc, sig))
     }
 
@@ -1236,6 +1330,47 @@ impl StvizApp {
         }
     }
 
+    fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        if self.convert_running {
+            return;
+        }
+        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped_files.is_empty() {
+            return;
+        }
+
+        let mut handled = false;
+        for file in dropped_files {
+            if let Some(path) = file.path {
+                let ext = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase());
+                match ext.as_deref() {
+                    Some("h5ad") => {
+                        self.queue_h5ad_convert(&path);
+                        handled = true;
+                        break;
+                    }
+                    Some("stviz") => {
+                        if let Err(e) = self.load_dataset(&path) {
+                            let msg = format!("Load failed: {e:#}");
+                            eprintln!("{msg}");
+                            self.last_error = Some(msg);
+                        }
+                        handled = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if !handled {
+            self.convert_status = Some("Drop a .h5ad or .stviz file.".to_string());
+        }
+    }
+
     fn main_view_frame_interval(&self) -> std::time::Duration {
         let hz = self.main_view_fps_cap_hz.max(30.0);
         std::time::Duration::from_secs_f32(1.0 / hz)
@@ -1258,7 +1393,10 @@ impl StvizApp {
                 self.convert_status = Some(result.msg);
                 if result.load_after {
                     if !result.output.exists() {
-                        let msg = format!("Load skipped: output not found at {}", result.output.display());
+                        let msg = format!(
+                            "Load skipped: output not found at {}",
+                            result.output.display()
+                        );
                         self.convert_status = Some(msg.clone());
                         self.last_error = Some(msg);
                         return;
@@ -1270,10 +1408,8 @@ impl StvizApp {
                         self.convert_status = Some(msg);
                     } else {
                         self.open_path = result.output.display().to_string();
-                        self.convert_status = Some(format!(
-                            "Loaded dataset: {}",
-                            result.output.display()
-                        ));
+                        self.convert_status =
+                            Some(format!("Loaded dataset: {}", result.output.display()));
                     }
                 }
             }
@@ -1287,7 +1423,7 @@ impl StvizApp {
                 .and_then(|name| name.to_str())
                 .map(|name| name.starts_with("mock_convert_log_"))
                 .unwrap_or(false);
-            if is_mock_log {
+            if is_mock_log && Self::path_within_root(&self.logs_dir, &path) {
                 let _ = std::fs::remove_file(&path);
                 self.convert_log_path = None;
             }
@@ -1305,7 +1441,10 @@ impl StvizApp {
 
     fn queue_h5ad_convert(&mut self, path: &Path) {
         self.convert_input = path.display().to_string();
-        self.convert_output = self.default_convert_output(&self.convert_input).display().to_string();
+        self.convert_output = self
+            .default_convert_output(&self.convert_input)
+            .display()
+            .to_string();
         self.start_convert();
     }
 
@@ -1349,17 +1488,17 @@ impl StvizApp {
 
     fn cleanup_previous_mock(&mut self) {
         if let Some(path) = self.mock_last_h5ad.as_ref() {
-            if path.starts_with(&self.output_dir) {
+            if Self::path_within_root(&self.output_dir, path) {
                 let _ = std::fs::remove_file(path);
             }
         }
         if let Some(path) = self.mock_last_stviz.as_ref() {
-            if path.starts_with(&self.output_dir) {
+            if Self::path_within_root(&self.output_dir, path) {
                 let _ = std::fs::remove_file(path);
             }
         }
         if let Some(path) = self.mock_last_log.as_ref() {
-            if path.starts_with(&self.output_dir) {
+            if Self::path_within_root(&self.logs_dir, path) {
                 let _ = std::fs::remove_file(path);
             }
         }
@@ -1414,8 +1553,14 @@ Then add that path to your system environment variables (PATH).";
         let version = lines.next().unwrap_or("").trim().to_string();
         if !version.is_empty() {
             let mut parts = version.split(|c| c == '.' || c == ' ');
-            let major = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
-            let minor = parts.next().and_then(|v| v.parse::<u32>().ok()).unwrap_or(0);
+            let major = parts
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
+            let minor = parts
+                .next()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(0);
             if major > 0 && (major, minor) < MIN_PYTHON_VERSION {
                 return Err(format!(
                     "`{cmd}` is Python {version}, but {}.{}+ is required for the converter scripts.",
@@ -1429,8 +1574,8 @@ Then add that path to your system environment variables (PATH).";
     }
 
     fn python_from_env() -> Option<String> {
-        let env_prefix = std::env::var_os("VIRTUAL_ENV")
-            .or_else(|| std::env::var_os("CONDA_PREFIX"))?;
+        let env_prefix =
+            std::env::var_os("VIRTUAL_ENV").or_else(|| std::env::var_os("CONDA_PREFIX"))?;
         let base = PathBuf::from(env_prefix);
         let candidates = if cfg!(windows) {
             ["Scripts/python.exe", "python.exe"]
@@ -1456,6 +1601,36 @@ Then add that path to your system environment variables (PATH).";
         self.output_dir.join(format!("{stem}.stviz"))
     }
 
+    fn resolve_app_data_dir() -> PathBuf {
+        if let Ok(dir) = std::env::var("STVIZ_DATA_DIR") {
+            let trimmed = dir.trim();
+            if !trimmed.is_empty() {
+                return PathBuf::from(trimmed);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        if let Some(dir) = std::env::var_os("APPDATA") {
+            return PathBuf::from(dir).join(APP_DATA_DIR_NAME);
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(APP_DATA_DIR_NAME);
+        }
+        if let Some(dir) = std::env::var_os("XDG_DATA_HOME") {
+            return PathBuf::from(dir).join(APP_DATA_DIR_NAME);
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(APP_DATA_DIR_NAME);
+        }
+        std::env::temp_dir().join(APP_DATA_DIR_NAME)
+    }
+
     fn resolve_project_dir() -> PathBuf {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         if cwd.join("python").join("export_stviz.py").exists() {
@@ -1476,11 +1651,7 @@ Then add that path to your system environment variables (PATH).";
                 }
                 if let Some(parent) = dir.parent() {
                     let share_dir = parent.join("share").join("stviz-animate");
-                    if share_dir
-                        .join("python")
-                        .join("export_stviz.py")
-                        .exists()
-                    {
+                    if share_dir.join("python").join("export_stviz.py").exists() {
                         return share_dir;
                     }
                 }
@@ -1496,6 +1667,60 @@ Then add that path to your system environment variables (PATH).";
             }
         }
         cwd
+    }
+
+    fn managed_export_output_path(&self) -> PathBuf {
+        let raw = self.export_name.trim();
+        let mut file_name = if raw.is_empty() {
+            String::from("stviz-animate_loop.mp4")
+        } else {
+            Path::new(raw)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("stviz-animate_loop.mp4")
+                .trim()
+                .to_string()
+        };
+        if file_name.is_empty() {
+            file_name = String::from("stviz-animate_loop.mp4");
+        }
+        if Path::new(&file_name).extension().is_none() {
+            file_name.push_str(".mp4");
+        }
+        self.output_dir.join(file_name)
+    }
+
+    fn managed_export_temp_path(&self, final_out: &Path) -> PathBuf {
+        let stem = final_out
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("stviz-animate_loop");
+        let ext = final_out
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mp4");
+        self.export_dir.join(format!(
+            "{stem}.partial.{}.{}",
+            chrono_like_timestamp(),
+            ext
+        ))
+    }
+
+    fn canonicalize_for_guard(path: &Path) -> Option<PathBuf> {
+        if path.exists() {
+            return std::fs::canonicalize(path).ok();
+        }
+        let parent = path.parent().and_then(|p| std::fs::canonicalize(p).ok())?;
+        let name = path.file_name()?;
+        Some(parent.join(name))
+    }
+
+    fn path_within_root(root: &Path, path: &Path) -> bool {
+        let root = Self::canonicalize_for_guard(root).unwrap_or_else(|| root.to_path_buf());
+        let Some(path) = Self::canonicalize_for_guard(path) else {
+            return false;
+        };
+        path.starts_with(root)
     }
 
     fn resolve_ffmpeg_path(project_dir: &Path) -> Option<PathBuf> {
@@ -1559,13 +1784,12 @@ Then add that path to your system environment variables (PATH).";
                 return Err(msg);
             }
         };
-        self.convert_last_python_exe = Some(python_exe);
-        let venv_dir = self.project_dir.join(".stviz_venv");
+        let venv_dir = self.converter_venv_dir.clone();
         let venv_python = Self::venv_python_path(&venv_dir);
         let base_env_root = Self::python_env_root(&python_cmd);
 
         if !venv_python.exists() {
-            self.append_export_log("Creating a private converter environment for OpenCV...");
+            self.append_export_log("Creating managed converter environment for OpenCV fallback...");
             let mut cmd = Command::new(&python_cmd);
             cmd.arg("-m").arg("venv").arg(&venv_dir);
             Self::apply_python_env(&mut cmd, base_env_root.as_deref());
@@ -1582,6 +1806,35 @@ Then add that path to your system environment variables (PATH).";
                 return Err(msg);
             }
         }
+        self.convert_last_python_exe = Some(if python_exe.is_empty() {
+            venv_python.display().to_string()
+        } else {
+            python_exe
+        });
+
+        self.append_export_log("Updating Python packaging tools...");
+        let mut bootstrap_cmd = Command::new(&venv_python);
+        bootstrap_cmd
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--upgrade")
+            .arg("pip")
+            .arg("setuptools")
+            .arg("wheel");
+        Self::apply_python_env(&mut bootstrap_cmd, Some(&venv_dir));
+        let bootstrap_out = bootstrap_cmd.output().map_err(|e| {
+            let msg = format!("Failed to bootstrap pip tooling: {e}");
+            self.append_export_log(&msg);
+            msg
+        })?;
+        if !bootstrap_out.status.success() {
+            let msg = "Failed to bootstrap pip tooling.".to_string();
+            self.append_export_log(&msg);
+            self.append_export_log(&String::from_utf8_lossy(&bootstrap_out.stdout));
+            self.append_export_log(&String::from_utf8_lossy(&bootstrap_out.stderr));
+            return Err(msg);
+        }
 
         self.append_export_log("Checking OpenCV (cv2) dependency...");
         let mut check_cmd = Command::new(&venv_python);
@@ -1594,24 +1847,22 @@ Then add that path to your system environment variables (PATH).";
         })?;
 
         if !check_out.status.success() {
-            self.append_export_log(
-                "Installing OpenCV (opencv-python-headless). This may take a few minutes...",
-            );
+            self.append_export_log("Installing OpenCV dependency...");
             let mut pip_cmd = Command::new(&venv_python);
             pip_cmd
                 .arg("-m")
                 .arg("pip")
                 .arg("install")
-                .arg("-U")
+                .arg("--prefer-binary")
                 .arg("opencv-python-headless");
             Self::apply_python_env(&mut pip_cmd, Some(&venv_dir));
             let pip_out = pip_cmd.output().map_err(|e| {
-                let msg = format!("Failed to install OpenCV: {e}");
+                let msg = format!("Failed to install OpenCV dependency: {e}");
                 self.append_export_log(&msg);
                 msg
             })?;
             if !pip_out.status.success() {
-                let msg = "OpenCV install failed.".to_string();
+                let msg = "OpenCV dependency install failed.".to_string();
                 self.append_export_log(&msg);
                 self.append_export_log(&String::from_utf8_lossy(&pip_out.stdout));
                 self.append_export_log(&String::from_utf8_lossy(&pip_out.stderr));
@@ -1702,12 +1953,12 @@ Then add that path to your system environment variables (PATH).";
         Some(prefix)
     }
 
-    fn apply_subprocess_flags(cmd: &mut Command) {
+    fn apply_subprocess_flags(_cmd: &mut Command) {
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
             const CREATE_NO_WINDOW: u32 = 0x08000000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+            _cmd.creation_flags(CREATE_NO_WINDOW);
         }
     }
 
@@ -1742,7 +1993,10 @@ Then add that path to your system environment variables (PATH).";
         self.convert_input = h5ad_path.display().to_string();
         self.convert_output = stviz_path.display().to_string();
 
-        let script = self.project_dir.join("python").join("mock_spatial_dataset.py");
+        let script = self
+            .project_dir
+            .join("python")
+            .join("mock_spatial_dataset.py");
         if !script.exists() {
             self.convert_status = Some(format!(
                 "Mock dataset script not found: {}",
@@ -1770,8 +2024,9 @@ Then add that path to your system environment variables (PATH).";
         let include_expr = self.convert_include_expr;
         let generate_only = self.convert_generate_only;
         let project_dir = self.project_dir.clone();
+        let converter_venv_dir = self.converter_venv_dir.clone();
         let log_path = self
-            .output_dir
+            .logs_dir
             .join(format!("mock_convert_log_{}.txt", chrono_like_timestamp()));
         let seed: u64 = rand::thread_rng().gen();
 
@@ -1798,20 +2053,21 @@ Then add that path to your system environment variables (PATH).";
             append(&format!("Project dir: {}", project_dir.display()));
             append(&format!("Python cmd: {}", python_cmd));
 
-            let venv_dir = project_dir.join(".stviz_venv");
+            let venv_dir = converter_venv_dir;
             let venv_python = Self::venv_python_path(&venv_dir);
             let base_env_root = Self::python_env_root(&python_cmd);
-            append(&format!("Venv dir: {}", venv_dir.display()));
-            append(&format!("Venv python: {}", venv_python.display()));
             if !venv_python.exists() {
-                append("Creating a private converter environment...");
+                append("Creating managed converter environment...");
                 let mut cmd = Command::new(&python_cmd);
                 cmd.arg("-m").arg("venv").arg(&venv_dir);
                 Self::apply_python_env(&mut cmd, base_env_root.as_deref());
                 let out = cmd.output().map_err(|e| {
                     append("Failed to create the converter environment.");
                     append(&format!("Details: {e}"));
-                    format!("Failed to create virtual environment: {e}\nLog: {}", log_path.display())
+                    format!(
+                        "Failed to create virtual environment: {e}\nLog: {}",
+                        log_path.display()
+                    )
                 })?;
                 if !out.status.success() {
                     append("Environment setup output:");
@@ -1823,8 +2079,39 @@ Then add that path to your system environment variables (PATH).";
                         log_path.display()
                     ));
                 }
-            } else {
-                append("Converter environment found.");
+            }
+            append(&format!("Venv dir: {}", venv_dir.display()));
+            append(&format!("Venv python: {}", venv_python.display()));
+            append(&format!("Converter runtime: {}", venv_python.display()));
+
+            append("Updating Python packaging tools...");
+            let mut bootstrap_cmd = Command::new(&venv_python);
+            bootstrap_cmd
+                .arg("-m")
+                .arg("pip")
+                .arg("install")
+                .arg("--upgrade")
+                .arg("pip")
+                .arg("setuptools")
+                .arg("wheel");
+            Self::apply_python_env(&mut bootstrap_cmd, Some(&venv_dir));
+            let bootstrap_out = bootstrap_cmd.output().map_err(|e| {
+                append("Failed to bootstrap pip tooling.");
+                append(&format!("Details: {e}"));
+                format!(
+                    "Failed to bootstrap pip tooling: {e}\nLog: {}",
+                    log_path.display()
+                )
+            })?;
+            if !bootstrap_out.status.success() {
+                append("Bootstrap output:");
+                append(&String::from_utf8_lossy(&bootstrap_out.stdout));
+                append("Bootstrap error:");
+                append(&String::from_utf8_lossy(&bootstrap_out.stderr));
+                return Err(format!(
+                    "Failed to bootstrap pip tooling.\nLog: {}",
+                    log_path.display()
+                ));
             }
 
             append("Checking converter dependencies...");
@@ -1837,28 +2124,44 @@ Then add that path to your system environment variables (PATH).";
             let check_out = check_cmd.output().map_err(|e| {
                 append("Dependency check failed.");
                 append(&format!("Details: {e}"));
-                format!("Failed to check dependencies: {e}\nLog: {}", log_path.display())
+                format!(
+                    "Failed to check dependencies: {e}\nLog: {}",
+                    log_path.display()
+                )
             })?;
 
             if !check_out.status.success() {
-                append("Installing converter dependencies (this may take a minute)...");
-                append("pip install -U anndata h5py numpy pandas scipy");
+                append("Installing converter dependencies (first-run setup)...");
+                let requirements = project_dir.join("python").join("requirements.txt");
                 let mut pip_cmd = Command::new(&venv_python);
                 pip_cmd
                     .arg("-m")
                     .arg("pip")
                     .arg("install")
-                    .arg("-U")
-                    .arg("anndata")
-                    .arg("h5py")
-                    .arg("numpy")
-                    .arg("pandas")
-                    .arg("scipy");
+                    .arg("--prefer-binary");
+                if requirements.exists() {
+                    append(&format!(
+                        "pip install --prefer-binary -r {}",
+                        requirements.display()
+                    ));
+                    pip_cmd.arg("-r").arg(&requirements);
+                } else {
+                    append("requirements.txt not found; installing core converter deps.");
+                    pip_cmd
+                        .arg("anndata")
+                        .arg("h5py")
+                        .arg("numpy")
+                        .arg("pandas")
+                        .arg("scipy");
+                }
                 Self::apply_python_env(&mut pip_cmd, Some(&venv_dir));
                 let pip_out = pip_cmd.output().map_err(|e| {
                     append("Dependency install failed.");
                     append(&format!("Details: {e}"));
-                    format!("Failed to install dependencies: {e}\nLog: {}", log_path.display())
+                    format!(
+                        "Failed to install dependencies: {e}\nLog: {}",
+                        log_path.display()
+                    )
                 })?;
                 if !pip_out.status.success() {
                     append("Install output:");
@@ -1871,8 +2174,6 @@ Then add that path to your system environment variables (PATH).";
                     ));
                 }
                 append("Dependencies installed.");
-            } else {
-                append("Dependencies already installed.");
             }
 
             append("Generating the mock .h5ad file...");
@@ -1906,7 +2207,10 @@ Then add that path to your system environment variables (PATH).";
             let out = mock_cmd.output().map_err(|e| {
                 append("Mock dataset generation failed to start.");
                 append(&format!("Details: {e}"));
-                format!("Failed to run mock generator: {e}\nLog: {}", log_path.display())
+                format!(
+                    "Failed to run mock generator: {e}\nLog: {}",
+                    log_path.display()
+                )
             })?;
             if !out.status.success() {
                 append("Mock generation output:");
@@ -1953,10 +2257,7 @@ Then add that path to your system environment variables (PATH).";
                 append(&String::from_utf8_lossy(&out.stdout));
                 append("Conversion error:");
                 append(&String::from_utf8_lossy(&out.stderr));
-                return Err(format!(
-                    "Conversion failed.\nLog: {}",
-                    log_path.display()
-                ));
+                return Err(format!("Conversion failed.\nLog: {}", log_path.display()));
             }
             append("Conversion completed.");
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2008,13 +2309,14 @@ Then add that path to your system environment variables (PATH).";
         let include_expr = self.convert_include_expr;
         let generate_only = self.convert_generate_only;
         let project_dir = self.project_dir.clone();
+        let converter_venv_dir = self.converter_venv_dir.clone();
         let log_path = self
-            .output_dir
+            .logs_dir
             .join(format!("convert_log_{}.txt", chrono_like_timestamp()));
         self.convert_running = true;
         self.convert_log_path = Some(log_path.clone());
         self.convert_log_text.clear();
-        self.convert_status = Some("Preparing converter environment...".to_string());
+        self.convert_status = Some("Checking converter dependencies...".to_string());
         self.convert_handle = Some(thread::spawn(move || {
             let mut log = String::new();
             let mut append = |line: &str| {
@@ -2035,20 +2337,21 @@ Then add that path to your system environment variables (PATH).";
             append(&format!("Project dir: {}", project_dir.display()));
             append(&format!("Python cmd: {}", python_cmd));
 
-            let venv_dir = project_dir.join(".stviz_venv");
+            let venv_dir = converter_venv_dir;
             let venv_python = Self::venv_python_path(&venv_dir);
             let base_env_root = Self::python_env_root(&python_cmd);
-            append(&format!("Venv dir: {}", venv_dir.display()));
-            append(&format!("Venv python: {}", venv_python.display()));
             if !venv_python.exists() {
-                append("Creating a private converter environment...");
+                append("Creating managed converter environment...");
                 let mut cmd = Command::new(&python_cmd);
                 cmd.arg("-m").arg("venv").arg(&venv_dir);
                 Self::apply_python_env(&mut cmd, base_env_root.as_deref());
                 let out = cmd.output().map_err(|e| {
                     append("Failed to create the converter environment.");
                     append(&format!("Details: {e}"));
-                    format!("Failed to create virtual environment: {e}\nLog: {}", log_path.display())
+                    format!(
+                        "Failed to create virtual environment: {e}\nLog: {}",
+                        log_path.display()
+                    )
                 })?;
                 if !out.status.success() {
                     append("Environment setup output:");
@@ -2060,8 +2363,39 @@ Then add that path to your system environment variables (PATH).";
                         log_path.display()
                     ));
                 }
-            } else {
-                append("Converter environment found.");
+            }
+            append(&format!("Venv dir: {}", venv_dir.display()));
+            append(&format!("Venv python: {}", venv_python.display()));
+            append(&format!("Converter runtime: {}", venv_python.display()));
+
+            append("Updating Python packaging tools...");
+            let mut bootstrap_cmd = Command::new(&venv_python);
+            bootstrap_cmd
+                .arg("-m")
+                .arg("pip")
+                .arg("install")
+                .arg("--upgrade")
+                .arg("pip")
+                .arg("setuptools")
+                .arg("wheel");
+            Self::apply_python_env(&mut bootstrap_cmd, Some(&venv_dir));
+            let bootstrap_out = bootstrap_cmd.output().map_err(|e| {
+                append("Failed to bootstrap pip tooling.");
+                append(&format!("Details: {e}"));
+                format!(
+                    "Failed to bootstrap pip tooling: {e}\nLog: {}",
+                    log_path.display()
+                )
+            })?;
+            if !bootstrap_out.status.success() {
+                append("Bootstrap output:");
+                append(&String::from_utf8_lossy(&bootstrap_out.stdout));
+                append("Bootstrap error:");
+                append(&String::from_utf8_lossy(&bootstrap_out.stderr));
+                return Err(format!(
+                    "Failed to bootstrap pip tooling.\nLog: {}",
+                    log_path.display()
+                ));
             }
 
             append("Checking converter dependencies...");
@@ -2074,28 +2408,44 @@ Then add that path to your system environment variables (PATH).";
             let check_out = check_cmd.output().map_err(|e| {
                 append("Dependency check failed.");
                 append(&format!("Details: {e}"));
-                format!("Failed to check dependencies: {e}\nLog: {}", log_path.display())
+                format!(
+                    "Failed to check dependencies: {e}\nLog: {}",
+                    log_path.display()
+                )
             })?;
 
             if !check_out.status.success() {
-                append("Installing converter dependencies (this may take a minute)...");
-                append("pip install -U anndata h5py numpy pandas scipy");
+                append("Installing converter dependencies (first-run setup)...");
+                let requirements = project_dir.join("python").join("requirements.txt");
                 let mut pip_cmd = Command::new(&venv_python);
                 pip_cmd
                     .arg("-m")
                     .arg("pip")
                     .arg("install")
-                    .arg("-U")
-                    .arg("anndata")
-                    .arg("h5py")
-                    .arg("numpy")
-                    .arg("pandas")
-                    .arg("scipy");
+                    .arg("--prefer-binary");
+                if requirements.exists() {
+                    append(&format!(
+                        "pip install --prefer-binary -r {}",
+                        requirements.display()
+                    ));
+                    pip_cmd.arg("-r").arg(&requirements);
+                } else {
+                    append("requirements.txt not found; installing core converter deps.");
+                    pip_cmd
+                        .arg("anndata")
+                        .arg("h5py")
+                        .arg("numpy")
+                        .arg("pandas")
+                        .arg("scipy");
+                }
                 Self::apply_python_env(&mut pip_cmd, Some(&venv_dir));
                 let pip_out = pip_cmd.output().map_err(|e| {
                     append("Dependency install failed.");
                     append(&format!("Details: {e}"));
-                    format!("Failed to install dependencies: {e}\nLog: {}", log_path.display())
+                    format!(
+                        "Failed to install dependencies: {e}\nLog: {}",
+                        log_path.display()
+                    )
                 })?;
                 if !pip_out.status.success() {
                     append("Install output:");
@@ -2108,8 +2458,6 @@ Then add that path to your system environment variables (PATH).";
                     ));
                 }
                 append("Dependencies installed.");
-            } else {
-                append("Dependencies already installed.");
             }
 
             append("Converting dataset...");
@@ -2145,10 +2493,7 @@ Then add that path to your system environment variables (PATH).";
                 append(&String::from_utf8_lossy(&out.stdout));
                 append("Conversion error:");
                 append(&String::from_utf8_lossy(&out.stderr));
-                return Err(format!(
-                    "Conversion failed.\nLog: {}",
-                    log_path.display()
-                ));
+                return Err(format!("Conversion failed.\nLog: {}", log_path.display()));
             }
             append("Conversion completed.");
             let stdout = String::from_utf8_lossy(&out.stdout);
@@ -2174,9 +2519,9 @@ Then add that path to your system environment variables (PATH).";
         let total = (duration * self.export_fps as f32).round().max(2.0) as u32;
 
         let ts = chrono_like_timestamp();
-        self.export_dir = self.output_dir.join(format!("loop_{ts}"));
+        self.export_dir = self.export_root_dir.join(format!("loop_{ts}"));
         let _ = std::fs::create_dir_all(&self.export_dir);
-        self.export_log_path = Some(self.output_dir.join(format!("export_log_{ts}.txt")));
+        self.export_log_path = Some(self.logs_dir.join(format!("export_log_{ts}.txt")));
         self.export_log_text.clear();
         self.export_log_open = true;
         self.export_log_focus = true;
@@ -2191,18 +2536,23 @@ Then add that path to your system environment variables (PATH).";
         self.export_finishing = false;
         self.export_cancelled = false;
         self.export_resolution = self.export_resolution_for_quality();
-        self.export_status = Some(format!(
-            "Exporting {total} frames ({:.2}s)...",
-            duration
-        ));
+        self.export_status = Some(format!("Exporting {total} frames ({:.2}s)...", duration));
         self.playing = false;
         self.export_camera = None;
 
         self.append_export_log("Loop export started.");
         self.append_export_log(&format!("Frames directory: {}", self.export_dir.display()));
-        let out_path = self.output_dir.join(self.export_name.trim());
+        let out_path = self.managed_export_output_path();
+        if let Some(name) = out_path.file_name().and_then(|s| s.to_str()) {
+            self.export_name = name.to_string();
+        }
+        let temp_out_path = self.managed_export_temp_path(&out_path);
         self.export_output_path = Some(out_path.clone());
+        self.export_temp_output_path = Some(temp_out_path.clone());
+        self.remove_export_output();
+        self.export_temp_output_path = Some(temp_out_path.clone());
         self.append_export_log(&format!("Output video: {}", out_path.display()));
+        self.append_export_log(&format!("Temporary video: {}", temp_out_path.display()));
         self.append_export_log(&format!("FPS: {}", self.export_fps));
         self.append_export_log(&format!("Total frames: {}", total));
         self.append_export_log(&format!("Duration (sec): {:.2}", duration));
@@ -2282,9 +2632,7 @@ Then add that path to your system environment variables (PATH).";
                     .sample_grid_obs_idx
                     .map(|idx| obs_name(ds, idx))
                     .unwrap_or_else(|| "unknown".to_string());
-                dataset_lines.push(format!(
-                    "Sample grid: enabled (group by {grid_obs})"
-                ));
+                dataset_lines.push(format!("Sample grid: enabled (group by {grid_obs})"));
             }
         }
         for line in dataset_lines {
@@ -2295,9 +2643,18 @@ Then add that path to your system environment variables (PATH).";
     fn finish_export_loop(&mut self) {
         let frames = self.export_total_frames;
         let frames_dir = self.export_dir.clone();
+        let final_out_path = self
+            .export_output_path
+            .clone()
+            .unwrap_or_else(|| self.managed_export_output_path());
+        let temp_out_path = self
+            .export_temp_output_path
+            .clone()
+            .unwrap_or_else(|| self.managed_export_temp_path(&final_out_path));
         self.export_camera = None;
         let keep_frames = self.export_keep_frames;
         if !self.export_run_ffmpeg {
+            self.export_temp_output_path = None;
             self.export_status = Some(format!(
                 "Exported {frames} frames to {}",
                 frames_dir.display()
@@ -2309,10 +2666,12 @@ Then add that path to your system environment variables (PATH).";
             return;
         }
 
-        let out_path = self.output_dir.join(self.export_name.trim());
         if let Some(ffmpeg_bin) = self.ffmpeg_path.clone() {
-            let pattern = frames_dir.join("frame_%06d.png").to_string_lossy().to_string();
-            let out_str = out_path.to_string_lossy().to_string();
+            let pattern = frames_dir
+                .join("frame_%06d.png")
+                .to_string_lossy()
+                .to_string();
+            let out_str = temp_out_path.to_string_lossy().to_string();
             let mut cmd = std::process::Command::new(&ffmpeg_bin);
             Self::apply_subprocess_flags(&mut cmd);
             let (crf, preset, pix_fmt) = match self.export_video_quality {
@@ -2339,16 +2698,28 @@ Then add that path to your system environment variables (PATH).";
 
             match output {
                 Ok(out) if out.status.success() => {
-                    if keep_frames {
-                        self.export_status = Some(format!(
-                            "Wrote video: {} (kept frames)",
-                            out_path.display()
-                        ));
-                        self.append_export_log("Video render succeeded (frames kept).");
-                    } else {
-                        self.export_status = Some(format!("Wrote video: {}", out_path.display()));
-                        self.append_export_log("Video render succeeded; cleaning PNG frames.");
-                        self.remove_export_frames(&frames_dir);
+                    match self.finalize_export_output(&temp_out_path, &final_out_path) {
+                        Ok(()) => {
+                            if keep_frames {
+                                self.export_status = Some(format!(
+                                    "Wrote video: {} (kept frames)",
+                                    final_out_path.display()
+                                ));
+                                self.append_export_log("Video render succeeded (frames kept).");
+                            } else {
+                                self.export_status =
+                                    Some(format!("Wrote video: {}", final_out_path.display()));
+                                self.append_export_log(
+                                    "Video render succeeded; cleaning PNG frames.",
+                                );
+                                self.remove_export_frames(&frames_dir);
+                            }
+                        }
+                        Err(e) => {
+                            self.export_status = Some(format!("Export finalize failed: {e}"));
+                            self.append_export_log(&format!("Export finalize failed: {e}"));
+                            self.remove_export_output();
+                        }
                     }
                 }
                 Ok(out) => {
@@ -2365,36 +2736,49 @@ Then add that path to your system environment variables (PATH).";
                         self.append_export_log("ffmpeg stderr:");
                         self.append_export_log(stderr.trim());
                     }
+                    self.remove_export_output();
                 }
                 Err(e) => {
                     self.export_status = Some(format!("ffmpeg error: {e}"));
                     self.append_export_log(&format!("ffmpeg error: {e}"));
+                    self.remove_export_output();
                 }
             }
             return;
         }
 
         self.append_export_log("ffmpeg not found; trying OpenCV fallback.");
-        match self.run_python_cv2_export(&frames_dir, &out_path) {
-            Ok(()) => {
-                if keep_frames {
-                    self.export_status = Some(format!(
-                        "Wrote video (OpenCV): {} (kept frames)",
-                        out_path.display()
-                    ));
-                    self.append_export_log("OpenCV export succeeded (frames kept).");
-                } else {
-                    self.export_status = Some(format!("Wrote video (OpenCV): {}", out_path.display()));
-                    self.append_export_log("OpenCV export succeeded; cleaning PNG frames.");
-                    self.remove_export_frames(&frames_dir);
+        match self.run_python_cv2_export(&frames_dir, &temp_out_path) {
+            Ok(()) => match self.finalize_export_output(&temp_out_path, &final_out_path) {
+                Ok(()) => {
+                    if keep_frames {
+                        self.export_status = Some(format!(
+                            "Wrote video (OpenCV): {} (kept frames)",
+                            final_out_path.display()
+                        ));
+                        self.append_export_log("OpenCV export succeeded (frames kept).");
+                    } else {
+                        self.export_status = Some(format!(
+                            "Wrote video (OpenCV): {}",
+                            final_out_path.display()
+                        ));
+                        self.append_export_log("OpenCV export succeeded; cleaning PNG frames.");
+                        self.remove_export_frames(&frames_dir);
+                    }
                 }
-            }
+                Err(e) => {
+                    self.export_status = Some(format!("Export finalize failed: {e}"));
+                    self.append_export_log(&format!("Export finalize failed: {e}"));
+                    self.remove_export_output();
+                }
+            },
             Err(e) => {
                 self.export_status = Some(format!(
                     "Exported {frames} frames to {} (OpenCV fallback failed)",
                     frames_dir.display()
                 ));
                 self.append_export_log(&format!("OpenCV fallback failed: {e}"));
+                self.remove_export_output();
             }
         }
     }
@@ -2417,7 +2801,60 @@ Then add that path to your system environment variables (PATH).";
         }
     }
 
+    fn finalize_export_output(
+        &mut self,
+        temp_path: &Path,
+        final_path: &Path,
+    ) -> Result<(), String> {
+        if !Self::path_within_root(&self.export_root_dir, temp_path) {
+            return Err(format!(
+                "Refusing to finalize output outside managed export root: {}",
+                temp_path.display()
+            ));
+        }
+        if !Self::path_within_root(&self.output_dir, final_path) {
+            return Err(format!(
+                "Refusing to write output outside managed output root: {}",
+                final_path.display()
+            ));
+        }
+        if !temp_path.exists() {
+            return Err(format!(
+                "Temporary export output missing: {}",
+                temp_path.display()
+            ));
+        }
+        if let Some(parent) = final_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if final_path.exists() {
+            std::fs::remove_file(final_path)
+                .map_err(|e| format!("Failed to replace existing output file: {e}"))?;
+        }
+        std::fs::rename(temp_path, final_path)
+            .map_err(|e| format!("Failed to finalize output: {e}"))?;
+        self.export_output_path = Some(final_path.to_path_buf());
+        self.export_temp_output_path = None;
+        self.append_export_log(&format!("Finalized output: {}", final_path.display()));
+        Ok(())
+    }
+
     fn remove_export_frames(&mut self, frames_dir: &Path) {
+        let is_loop_dir = frames_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|s| s.starts_with("loop_"))
+            .unwrap_or(false);
+        if !is_loop_dir || !Self::path_within_root(&self.export_root_dir, frames_dir) {
+            self.append_export_log(&format!(
+                "Refused to remove unmanaged frames directory: {}",
+                frames_dir.display()
+            ));
+            return;
+        }
+        if !frames_dir.exists() {
+            return;
+        }
         if let Err(e) = std::fs::remove_dir_all(frames_dir) {
             self.append_export_log(&format!(
                 "Failed to remove frames: {e} ({})",
@@ -2432,18 +2869,25 @@ Then add that path to your system environment variables (PATH).";
     }
 
     fn remove_export_output(&mut self) {
-        let Some(path) = self.export_output_path.take() else {
+        let Some(path) = self.export_temp_output_path.take() else {
             return;
         };
+        if !Self::path_within_root(&self.export_root_dir, &path) {
+            self.append_export_log(&format!(
+                "Refused to remove unmanaged temp output: {}",
+                path.display()
+            ));
+            return;
+        }
         if path.exists() {
             if let Err(e) = std::fs::remove_file(&path) {
                 self.append_export_log(&format!(
-                    "Failed to remove output: {e} ({})",
+                    "Failed to remove temporary output: {e} ({})",
                     path.display()
                 ));
             } else {
                 self.append_export_log(&format!(
-                    "Removed output file: {}",
+                    "Removed temporary output file: {}",
                     path.display()
                 ));
             }
@@ -2455,7 +2899,10 @@ Then add that path to your system environment variables (PATH).";
         // We trigger screenshots with a viewport command carrying user_data.
         let events = ctx.input(|i| i.events.clone());
         for ev in events {
-            if let egui::Event::Screenshot { image, user_data, .. } = ev {
+            if let egui::Event::Screenshot {
+                image, user_data, ..
+            } = ev
+            {
                 if let Some(req) = user_data
                     .data
                     .as_ref()
@@ -2551,17 +2998,28 @@ Then add that path to your system environment variables (PATH).";
         let use_opaque = params.use_opaque;
         drop(params);
 
+        let (active_from, active_to, color_from, color_to, segment_t, _seg_idx) =
+            self.current_segment(&ds);
         let viewport_px = [size[0] as f32, size[1] as f32];
         let mut view_camera = self.camera;
         if use_export_bbox {
-            if let Some(bbox) = self.export_fit_bbox(&ds) {
+            let bbox = self
+                .current_plot_bbox_for_segment(
+                    &ds,
+                    active_from,
+                    active_to,
+                    segment_t,
+                    draw_indices.as_slice(),
+                    from_override.as_deref().map(|v| v.as_slice()),
+                    to_override.as_deref().map(|v| v.as_slice()),
+                )
+                .or_else(|| self.export_fit_bbox(&ds));
+            if let Some(bbox) = bbox {
                 let mut cam = Camera2D::default();
                 cam.fit_bbox(bbox, viewport_px, 0.98);
                 view_camera = cam;
             }
         }
-        let (active_from, active_to, color_from, color_to, segment_t, _seg_idx) =
-            self.current_segment(&ds);
         let from_space = active_from as u32;
         let to_space = active_to as u32;
         let (from_center, from_scale) = if let Some(space) = ds.meta.spaces.get(active_from) {
@@ -2585,8 +3043,12 @@ Then add that path to your system environment variables (PATH).";
         if self.last_viewport_px[0] > 0.0 && self.last_viewport_px[1] > 0.0 {
             let scale_x = size[0] as f32 / self.last_viewport_px[0];
             let scale_y = size[1] as f32 / self.last_viewport_px[1];
-            point_radius_px *= scale_x.min(scale_y);
+            let export_scale = scale_x.min(scale_y);
+            if export_scale > 1.0 {
+                point_radius_px *= export_scale;
+            }
         }
+        point_radius_px = point_radius_px.max(1.0);
         let uniforms = Uniforms {
             viewport_px,
             _pad0: [0.0; 2],
@@ -2611,8 +3073,11 @@ Then add that path to your system environment variables (PATH).";
         let use_msaa = sample_count > 1;
         let gpu = if use_msaa {
             if self.offscreen_gpu_msaa.is_none() {
-                self.offscreen_gpu_msaa =
-                    Some(PointCloudGpu::new_with_sample_count(device, target_format, sample_count));
+                self.offscreen_gpu_msaa = Some(PointCloudGpu::new_with_sample_count(
+                    device,
+                    target_format,
+                    sample_count,
+                ));
             }
             self.offscreen_gpu_msaa.as_mut().unwrap()
         } else {
@@ -2621,7 +3086,7 @@ Then add that path to your system environment variables (PATH).";
             }
             self.offscreen_gpu.as_mut().unwrap()
         };
-        let _ = gpu.prepare(
+        gpu.prepare(
             device,
             queue,
             target_format,
@@ -2640,7 +3105,8 @@ Then add that path to your system environment variables (PATH).";
             from_override_id,
             to_override_id,
             uniforms,
-        );
+        )
+        .map_err(|e| format!("GPU prepare failed: {e}"))?;
 
         let resolve_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("export_frame_resolve"),
@@ -2862,7 +3328,7 @@ Then add that path to your system environment variables (PATH).";
         let drop_label = if self.convert_running {
             "Converting..."
         } else {
-            "Drop .h5ad or .stviz here (or click to pick)"
+            "Drop .h5ad or .stviz anywhere (or click to pick)"
         };
         let drop_text_color = if self.convert_running {
             egui::Color32::from_rgb(230, 240, 255)
@@ -2876,8 +3342,7 @@ Then add that path to your system environment variables (PATH).";
             egui::FontId::proportional(13.0),
             drop_text_color,
         );
-        let drop_resp =
-            drop_resp.on_hover_text("Drop a .h5ad to convert, or a .stviz to load.");
+        let drop_resp = drop_resp.on_hover_text("Drop a .h5ad to convert, or a .stviz to load.");
         if drop_resp.clicked() && !self.convert_running {
             let dialog = rfd::FileDialog::new()
                 .add_filter("h5ad", &["h5ad"])
@@ -2885,7 +3350,12 @@ Then add that path to your system environment variables (PATH).";
                 .set_title("Select .h5ad or .stviz")
                 .set_directory(self.project_dir.clone());
             if let Some(path) = dialog.pick_file() {
-                match path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.to_ascii_lowercase()).as_deref() {
+                match path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .map(|ext| ext.to_ascii_lowercase())
+                    .as_deref()
+                {
                     Some("h5ad") => self.queue_h5ad_convert(&path),
                     Some("stviz") => {
                         if let Err(e) = self.load_dataset(&path) {
@@ -2895,59 +3365,17 @@ Then add that path to your system environment variables (PATH).";
                         }
                     }
                     _ => {
-                        self.convert_status =
-                            Some("Pick a .h5ad or .stviz file.".to_string());
+                        self.convert_status = Some("Pick a .h5ad or .stviz file.".to_string());
                     }
                 }
             }
         }
-        let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
-        if !dropped_files.is_empty() && !self.convert_running {
-            let in_rect = ctx
-                .input(|i| i.pointer.hover_pos())
-                .map(|pos| drop_rect.contains(pos))
-                .unwrap_or(drop_resp.hovered());
-            if in_rect {
-                let mut handled = false;
-                for file in dropped_files {
-                    if let Some(path) = file.path {
-                        let ext = path
-                            .extension()
-                            .and_then(|ext| ext.to_str())
-                            .map(|ext| ext.to_ascii_lowercase());
-                        match ext.as_deref() {
-                            Some("h5ad") => {
-                                self.queue_h5ad_convert(&path);
-                                handled = true;
-                                break;
-                            }
-                            Some("stviz") => {
-                                if let Err(e) = self.load_dataset(&path) {
-                                    let msg = format!("Load failed: {e:#}");
-                                    eprintln!("{msg}");
-                                    self.last_error = Some(msg);
-                                }
-                                handled = true;
-                                break;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                if !handled {
-                    self.convert_status =
-                        Some("Drop a .h5ad or .stviz file.".to_string());
-                }
-            }
-        }
-
         ui.separator();
         egui::CollapsingHeader::new("Conversion log")
             .default_open(true)
             .show(ui, |ui| {
                 if ui.button("Copy log").clicked() {
-                    ui.ctx()
-                        .copy_text(self.convert_log_text.clone());
+                    ui.ctx().copy_text(self.convert_log_text.clone());
                 }
                 let row_height = ui.text_style_height(&egui::TextStyle::Body);
                 let max_height = row_height * 6.0 + 8.0;
@@ -3016,7 +3444,10 @@ Then add that path to your system environment variables (PATH).";
                 .selected_text(format!("{selected}%"))
                 .show_ui(ui, |ui| {
                     for pct in presets {
-                        if ui.selectable_value(&mut selected, pct, format!("{pct}%")).clicked() {
+                        if ui
+                            .selectable_value(&mut selected, pct, format!("{pct}%"))
+                            .clicked()
+                        {
                             self.ui_scale = pct as f32 / 100.0;
                         }
                     }
@@ -3056,8 +3487,11 @@ Then add that path to your system environment variables (PATH).";
         ui.horizontal(|ui| {
             if Self::is_wsl() {
                 self.fullscreen = false;
-                ui.add_enabled(false, egui::Checkbox::new(&mut self.fullscreen, "Fullscreen"))
-                    .on_hover_text("Fullscreen is not supported on WSL.");
+                ui.add_enabled(
+                    false,
+                    egui::Checkbox::new(&mut self.fullscreen, "Fullscreen"),
+                )
+                .on_hover_text("Fullscreen is not supported on WSL.");
             } else {
                 let changed = ui.checkbox(&mut self.fullscreen, "Fullscreen").changed();
                 if changed {
@@ -3105,7 +3539,10 @@ Then add that path to your system environment variables (PATH).";
         ui.separator();
         ui.label("Sample grid (spatial)");
         let mut grid_changed = false;
-        if ui.checkbox(&mut self.sample_grid_enabled, "Enable sample grid").changed() {
+        if ui
+            .checkbox(&mut self.sample_grid_enabled, "Enable sample grid")
+            .changed()
+        {
             grid_changed = true;
         }
 
@@ -3157,7 +3594,13 @@ Then add that path to your system environment variables (PATH).";
 
             let mut space_idx = self.sample_grid_space_idx.unwrap_or(0);
             egui::ComboBox::from_label("Grid space (most likely spatial)")
-                .selected_text(ds.meta.spaces.get(space_idx).map(|s| s.name.as_str()).unwrap_or("?"))
+                .selected_text(
+                    ds.meta
+                        .spaces
+                        .get(space_idx)
+                        .map(|s| s.name.as_str())
+                        .unwrap_or("?"),
+                )
                 .show_ui(ui, |ui| {
                     for (i, s) in ds.meta.spaces.iter().enumerate() {
                         if ui.selectable_value(&mut space_idx, i, &s.name).changed() {
@@ -3203,8 +3646,7 @@ Then add that path to your system environment variables (PATH).";
 
                 if self.sample_grid_label_mode == SampleGridLabelMode::Custom {
                     if let Some(obs_idx) = self.sample_grid_obs_idx {
-                        if let Ok((_name, _labels, categories, _pal)) =
-                            ds.obs_categorical(obs_idx)
+                        if let Ok((_name, _labels, categories, _pal)) = ds.obs_categorical(obs_idx)
                         {
                             if categories.len() <= MAX_GRID_CATEGORIES {
                                 self.ensure_sample_grid_custom_labels(obs_idx, &categories);
@@ -3214,13 +3656,24 @@ Then add that path to your system environment variables (PATH).";
                                 egui::ScrollArea::vertical()
                                     .max_height(140.0)
                                     .show(ui, |ui| {
+                                        let row_height = ui.spacing().interact_size.y;
                                         for (i, cat) in categories.iter().enumerate() {
                                             ui.horizontal(|ui| {
-                                                ui.label(cat);
+                                                let label_width = (ui.available_width() * 0.38)
+                                                    .clamp(90.0, 220.0);
+                                                ui.add_sized(
+                                                    [label_width, row_height],
+                                                    egui::Label::new(cat).truncate(),
+                                                );
                                                 if let Some(val) =
                                                     self.sample_grid_custom_labels.get_mut(i)
                                                 {
-                                                    ui.text_edit_singleline(val);
+                                                    let edit_width =
+                                                        (ui.available_width() - 8.0).max(120.0);
+                                                    ui.add_sized(
+                                                        [edit_width, row_height],
+                                                        egui::TextEdit::singleline(val),
+                                                    );
                                                 }
                                             });
                                         }
@@ -3285,7 +3738,10 @@ Then add that path to your system environment variables (PATH).";
                         .selected_text(current)
                         .show_ui(ui, |ui| {
                             for (i, n) in options {
-                                if ui.selectable_value(&mut self.active_obs_idx, i, n).changed() {
+                                if ui
+                                    .selectable_value(&mut self.active_obs_idx, i, n)
+                                    .changed()
+                                {
                                     changed = true;
                                 }
                             }
@@ -3477,18 +3933,23 @@ Then add that path to your system environment variables (PATH).";
                                             .min(ui.ctx().available_rect().height() * 0.7);
                                         egui::ScrollArea::vertical()
                                             .max_height(list_max)
-                                            .show_rows(ui, row_height, categories.len(), |ui, range| {
-                                                render_filter_rows(
-                                                    ui,
-                                                    range,
-                                                    categories,
-                                                    palette_slice,
-                                                    enabled_categories,
-                                                    overrides,
-                                                    &mut filter_changed,
-                                                    &mut colors_changed,
-                                                );
-                                            });
+                                            .show_rows(
+                                                ui,
+                                                row_height,
+                                                categories.len(),
+                                                |ui, range| {
+                                                    render_filter_rows(
+                                                        ui,
+                                                        range,
+                                                        categories,
+                                                        palette_slice,
+                                                        enabled_categories,
+                                                        overrides,
+                                                        &mut filter_changed,
+                                                        &mut colors_changed,
+                                                    );
+                                                },
+                                            );
                                     });
                                 self.filter_popup_open = open;
                             }
@@ -3496,13 +3957,21 @@ Then add that path to your system environment variables (PATH).";
 
                         ui.horizontal(|ui| {
                             if !too_many {
-                                if ui.button("All").on_hover_text("Enable all categories.").clicked() {
+                                if ui
+                                    .button("All")
+                                    .on_hover_text("Enable all categories.")
+                                    .clicked()
+                                {
                                     for v in &mut self.enabled_categories {
                                         *v = true;
                                     }
                                     filter_changed = true;
                                 }
-                                if ui.button("None").on_hover_text("Disable all categories.").clicked() {
+                                if ui
+                                    .button("None")
+                                    .on_hover_text("Disable all categories.")
+                                    .clicked()
+                                {
                                     for v in &mut self.enabled_categories {
                                         *v = false;
                                     }
@@ -3516,12 +3985,15 @@ Then add that path to your system environment variables (PATH).";
                                     .get(&self.active_obs_idx)
                                     .map(|s| s == &self.enabled_categories)
                                     .unwrap_or(false);
-                                let needs_apply =
-                                    filter_changed || desired_active != active_now || (desired_active && !state_matches);
+                                let needs_apply = filter_changed
+                                    || desired_active != active_now
+                                    || (desired_active && !state_matches);
                                 if needs_apply {
                                     if desired_active {
-                                        self.category_state
-                                            .insert(self.active_obs_idx, self.enabled_categories.clone());
+                                        self.category_state.insert(
+                                            self.active_obs_idx,
+                                            self.enabled_categories.clone(),
+                                        );
                                         self.active_filters.insert(self.active_obs_idx);
                                     } else {
                                         self.active_filters.remove(&self.active_obs_idx);
@@ -3531,23 +4003,6 @@ Then add that path to your system environment variables (PATH).";
                                 }
                             }
                         });
-
-                        if !too_many && !self.active_filters.is_empty() {
-                            ui.separator();
-                            ui.label("Active filters");
-                            for obs_idx in self.active_filters.iter().copied().collect::<Vec<_>>() {
-                                let label = obs_name(&ds, obs_idx);
-                                ui.label(label);
-                            }
-                            if ui
-                                .button("Clear all filters")
-                                .on_hover_text("Disable all active filters.")
-                                .clicked()
-                            {
-                                self.active_filters.clear();
-                                let _ = self.recompute_draw_indices_with_filters();
-                            }
-                        }
                     }
                     if palette_changed || colors_changed {
                         self.category_palette_cache = None;
@@ -3606,43 +4061,35 @@ Then add that path to your system environment variables (PATH).";
                         ui.label(format!("Selected: {selected}"));
                     }
                     let needle = self.gene_query.trim().to_ascii_lowercase();
-                    let mut shown = 0usize;
                     let mut total = 0usize;
-                    let limit = 120usize;
                     let gene_row_height = ui.spacing().interact_size.y.max(20.0);
                     let gene_max = gene_row_height * 10.0 + 8.0;
                     egui::ScrollArea::vertical()
                         .max_height(gene_max)
                         .show(ui, |ui| {
-                        for name in &expr.var_names {
-                            let is_match = if needle.is_empty() {
-                                true
-                            } else {
-                                name.to_ascii_lowercase().contains(&needle)
-                            };
-                            if !is_match {
-                                continue;
+                            for name in &expr.var_names {
+                                let is_match = if needle.is_empty() {
+                                    true
+                                } else {
+                                    name.to_ascii_lowercase().contains(&needle)
+                                };
+                                if !is_match {
+                                    continue;
+                                }
+                                total += 1;
+                                let is_selected = self
+                                    .gene_selected
+                                    .as_ref()
+                                    .map(|g| g == name)
+                                    .unwrap_or(false);
+                                if ui.selectable_label(is_selected, name).clicked() {
+                                    self.gene_selected = Some(name.clone());
+                                    apply_gene = Some(name.clone());
+                                }
                             }
-                            total += 1;
-                            if shown >= limit {
-                                continue;
-                            }
-                            let is_selected = self
-                                .gene_selected
-                                .as_ref()
-                                .map(|g| g == name)
-                                .unwrap_or(false);
-                            if ui.selectable_label(is_selected, name).clicked() {
-                                self.gene_selected = Some(name.clone());
-                                apply_gene = Some(name.clone());
-                            }
-                            shown += 1;
-                        }
-                    });
+                        });
                     if total == 0 {
                         ui.label("No matches.");
-                    } else if total > limit {
-                        ui.label(format!("Showing {limit} of {total} matches."));
                     }
 
                     if let Some(gene) = apply_gene {
@@ -3658,7 +4105,7 @@ Then add that path to your system environment variables (PATH).";
                                 let vmax = vmax.max(1e-6);
                                 let colors = gradient_map(&vec, vmin, vmax, &colorous::VIRIDIS);
                                 self.colors_rgba8 = Arc::new(colors);
-                                self.colors_opaque = true;
+                                self.colors_opaque = vec.iter().all(|v| v.is_finite());
                                 self.colors_id = self.next_color_id();
                                 self.legend_range = Some(LegendRange {
                                     label: format!("Gene: {gene}"),
@@ -3672,11 +4119,34 @@ Then add that path to your system environment variables (PATH).";
                 } else {
                     ui.label("No gene expression data in this file.");
                 }
-
             }
         }
 
-        let legend = self.active_legend_range.as_ref().or(self.legend_range.as_ref());
+        if !self.active_filters.is_empty() {
+            ui.separator();
+            ui.label("Active filters");
+            let mut active = self.active_filters.iter().copied().collect::<Vec<_>>();
+            active.sort_unstable();
+            egui::ScrollArea::vertical()
+                .max_height(90.0)
+                .show(ui, |ui| {
+                    for obs_idx in active {
+                        ui.label(obs_name(&ds, obs_idx));
+                    }
+                });
+            if ui
+                .button("Clear all filters")
+                .on_hover_text("Disable all active filters and reset category masks.")
+                .clicked()
+            {
+                self.clear_all_filters(&ds);
+            }
+        }
+
+        let legend = self
+            .active_legend_range
+            .as_ref()
+            .or(self.legend_range.as_ref());
         if let Some(legend) = legend {
             ui.separator();
             ui.label("Legend");
@@ -3707,7 +4177,8 @@ Then add that path to your system environment variables (PATH).";
         });
         if ds.meta.n_points > 0 {
             let max_cap = ds.meta.n_points as usize;
-            let mut slider = egui::Slider::new(&mut self.max_draw_points, 0..=max_cap).text("max draw (0 = all)");
+            let mut slider = egui::Slider::new(&mut self.max_draw_points, 0..=max_cap)
+                .text("max draw (0 = all)");
             slider = slider.logarithmic(true).smallest_positive(1.0);
             if ui.add(slider).changed() {
                 self.apply_downsample();
@@ -3739,7 +4210,10 @@ Then add that path to your system environment variables (PATH).";
         if self.exporting_loop {
             output_frame = output_frame
                 .fill(egui::Color32::from_rgb(40, 60, 90))
-                .stroke(egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 170, 220)));
+                .stroke(egui::Stroke::new(
+                    1.2,
+                    egui::Color32::from_rgb(120, 170, 220),
+                ));
         }
         output_frame.show(ui, |ui| {
             if self.exporting_loop {
@@ -3747,16 +4221,35 @@ Then add that path to your system environment variables (PATH).";
             } else {
                 ui.label("Output");
             }
+            ui.small(format!("Data directory: {}", self.app_data_dir.display()));
+            ui.horizontal(|ui| {
+                ui.label("Screenshot name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.screenshot_name)
+                        .hint_text("stviz-animate_screenshot"),
+                );
+            });
             if ui.button("Screenshot").clicked() {
                 let ts = chrono_like_timestamp();
-                let path = self.screenshot_dir.join(format!("stviz-animate_screenshot_{ts}.png"));
+                let mut stem = self.screenshot_name.trim().to_string();
+                if stem.is_empty() {
+                    stem = "stviz-animate_screenshot".to_string();
+                }
+                if stem.to_ascii_lowercase().ends_with(".png") {
+                    stem.truncate(stem.len().saturating_sub(4));
+                }
+                let path = self.screenshot_dir.join(format!("{stem}_{ts}.png"));
                 if let Err(err) = self.render_export_frame(SCREENSHOT_RESOLUTION, &path, false) {
                     self.export_status = Some(format!("Screenshot failed: {err}"));
                 }
             }
             ui.add_space(6.0);
             ui.label("Loop export");
-            ui.add(egui::DragValue::new(&mut self.export_fps).range(1..=240).prefix("fps "));
+            ui.add(
+                egui::DragValue::new(&mut self.export_fps)
+                    .range(1..=240)
+                    .prefix("fps "),
+            );
             ui.add(
                 egui::DragValue::new(&mut self.export_duration_sec)
                     .range(0.5..=120.0)
@@ -3796,8 +4289,8 @@ Then add that path to your system environment variables (PATH).";
                 let label = match self.export_video_quality {
                     ExportVideoQuality::Standard => "Standard (CRF 23, yuv420p)",
                     ExportVideoQuality::High => "High (CRF 18, yuv420p)",
-                ExportVideoQuality::Ultra => "Ultra (CRF 14, yuv420p)",
-            };
+                    ExportVideoQuality::Ultra => "Ultra (CRF 14, yuv420p)",
+                };
                 egui::ComboBox::from_id_salt("export_video_quality")
                     .selected_text(label)
                     .show_ui(ui, |ui| {
@@ -3822,7 +4315,10 @@ Then add that path to your system environment variables (PATH).";
                 ui.label("Output");
                 ui.text_edit_singleline(&mut self.export_name);
             });
-            if ui.checkbox(&mut self.export_run_ffmpeg, "Run ffmpeg if available").changed() {
+            if ui
+                .checkbox(&mut self.export_run_ffmpeg, "Run ffmpeg if available")
+                .changed()
+            {
                 self.refresh_ffmpeg_path();
             }
             if self.export_run_ffmpeg && !self.ffmpeg_available {
@@ -3839,13 +4335,20 @@ Then add that path to your system environment variables (PATH).";
                 "Keep PNG frames"
             };
             if ui
-                .add_enabled(!keep_forced, egui::Checkbox::new(&mut keep_pref, keep_label))
+                .add_enabled(
+                    !keep_forced,
+                    egui::Checkbox::new(&mut keep_pref, keep_label),
+                )
                 .changed()
             {
                 self.export_keep_frames = keep_pref;
             }
             if ui
-                .button(if self.exporting_loop { "Exporting..." } else { "Export loop video" })
+                .button(if self.exporting_loop {
+                    "Exporting..."
+                } else {
+                    "Export loop video"
+                })
                 .clicked()
             {
                 self.start_export_loop();
@@ -3865,7 +4368,11 @@ Then add that path to your system environment variables (PATH).";
             if !self.export_log_text.trim().is_empty() {
                 ui.separator();
                 let mut log_rect = None;
-                let open_override = if self.export_log_open { Some(true) } else { None };
+                let open_override = if self.export_log_open {
+                    Some(true)
+                } else {
+                    None
+                };
                 egui::CollapsingHeader::new("Export log")
                     .open(open_override)
                     .show(ui, |ui| {
@@ -3905,7 +4412,8 @@ Then add that path to your system environment variables (PATH).";
                 visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 52, 62);
                 visuals.widgets.active.bg_fill = egui::Color32::from_rgb(60, 70, 84);
                 visuals.selection.bg_fill = egui::Color32::from_rgb(70, 110, 160);
-                visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 190, 235));
+                visuals.selection.stroke =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 190, 235));
                 visuals
             }
             UiTheme::Matrix => {
@@ -3927,7 +4435,8 @@ Then add that path to your system environment variables (PATH).";
                 visuals.widgets.hovered.fg_stroke =
                     egui::Stroke::new(1.2, egui::Color32::from_rgb(110, 230, 150));
                 visuals.selection.bg_fill = egui::Color32::from_rgb(0, 90, 50);
-                visuals.selection.stroke = egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 230, 150));
+                visuals.selection.stroke =
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 230, 150));
                 visuals.hyperlink_color = egui::Color32::from_rgb(80, 190, 110);
                 visuals
             }
@@ -3950,7 +4459,9 @@ Then add that path to your system environment variables (PATH).";
             let scroll = ctx.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.0 {
                 let zoom_factor = (1.0 + scroll * 0.0015).clamp(0.8, 1.25);
-                let mouse = ctx.input(|i| i.pointer.hover_pos()).unwrap_or(rect.center());
+                let mouse = ctx
+                    .input(|i| i.pointer.hover_pos())
+                    .unwrap_or(rect.center());
                 let ppp = ctx.pixels_per_point();
                 let local = mouse - rect.min;
                 self.camera.zoom_at_viewport_pixel(
@@ -3984,10 +4495,7 @@ Then add that path to your system environment variables (PATH).";
             let drawn = self.draw_indices.len();
             let label = format!(
                 "{} | {:.1} fps | {:.1} ms | drawn {}",
-                self.adapter_label,
-                fps,
-                self.frame_ms_avg,
-                drawn
+                self.adapter_label, fps, self.frame_ms_avg, drawn
             );
             ui.painter().text(
                 rect.right_top() + egui::vec2(-6.0, 6.0),
@@ -4027,11 +4535,15 @@ Then add that path to your system environment variables (PATH).";
         let (from_center, from_scale, to_center, to_scale) = if let Some(ds) = ds_opt.as_ref() {
             if let Some((pos, _bbox)) = self.grid_positions_for(ds, active_from) {
                 from_override = Some(pos);
-                from_override_id = self.grid_version ^ ((active_from as u64) << 32);
+                if let Some(obs_idx) = self.sample_grid_obs_idx {
+                    from_override_id = self.sample_grid_override_id(active_from, obs_idx);
+                }
             }
             if let Some((pos, _bbox)) = self.grid_positions_for(ds, active_to) {
                 to_override = Some(pos);
-                to_override_id = self.grid_version ^ ((active_to as u64) << 32);
+                if let Some(obs_idx) = self.sample_grid_obs_idx {
+                    to_override_id = self.sample_grid_override_id(active_to, obs_idx);
+                }
             }
             let from = if let Some(space) = ds.meta.spaces.get(active_from) {
                 self.space_transform(ds, active_from, space)
@@ -4093,6 +4605,28 @@ Then add that path to your system environment variables (PATH).";
                 draw_indices = indices;
                 indices_id = id;
             }
+            let n_points = ds.meta.n_points;
+            if draw_indices.iter().any(|&idx| idx >= n_points) {
+                let before = draw_indices.len();
+                let filtered: Vec<u32> = draw_indices
+                    .iter()
+                    .copied()
+                    .filter(|&idx| idx < n_points)
+                    .collect();
+                let dropped = before.saturating_sub(filtered.len());
+                let msg = format!("Dropped {dropped} invalid draw indices (n_points={n_points}).");
+                self.last_error = Some(msg.clone());
+                if self.exporting_loop || self.export_finishing {
+                    self.append_export_log(&msg);
+                    self.export_status = Some(format!("Export failed: {msg}"));
+                    self.exporting_loop = false;
+                    self.export_finishing = false;
+                    self.export_cancelled = false;
+                    self.export_camera = None;
+                }
+                draw_indices = Arc::new(filtered);
+                indices_id = indices_id.wrapping_add(1);
+            }
         }
 
         self.active_legend_range = if self.color_path_enabled {
@@ -4152,7 +4686,9 @@ Then add that path to your system environment variables (PATH).";
         self.draw_view_overlays(ui, rect);
 
         if self.exporting_loop && self.export_total_frames > 0 {
-            let path = self.export_dir.join(format!("frame_{:06}.png", self.export_frame_index));
+            let path = self
+                .export_dir
+                .join(format!("frame_{:06}.png", self.export_frame_index));
             if let Some(res) = self.export_resolution {
                 if let Err(err) = self.render_export_frame(res, &path, true) {
                     self.append_export_log(&format!("Export render failed: {err}"));
@@ -4185,13 +4721,101 @@ Then add that path to your system environment variables (PATH).";
         }
     }
 
-    fn effective_bbox(&mut self, ds: &Dataset, space_idx: usize, space: &crate::data::SpaceMeta) -> [f32; 4] {
+    fn effective_bbox(
+        &mut self,
+        ds: &Dataset,
+        space_idx: usize,
+        space: &crate::data::SpaceMeta,
+    ) -> [f32; 4] {
         if self.sample_grid_enabled && self.sample_grid_space_idx == Some(space_idx) {
             if let Some((_pos, bbox)) = self.grid_positions_for(ds, space_idx) {
                 return bbox;
             }
         }
         space.bbox
+    }
+
+    fn current_plot_bbox_for_segment(
+        &mut self,
+        ds: &Dataset,
+        from_space: usize,
+        to_space: usize,
+        segment_t: f32,
+        draw_indices: &[u32],
+        from_override: Option<&[f32]>,
+        to_override: Option<&[f32]>,
+    ) -> Option<[f32; 4]> {
+        if draw_indices.is_empty() {
+            return None;
+        }
+        let n = ds.meta.n_points as usize;
+        if n == 0 {
+            return None;
+        }
+        let from_meta = ds.meta.spaces.get(from_space)?;
+        let to_meta = ds.meta.spaces.get(to_space)?;
+        let (from_center, from_scale) = self.space_transform(ds, from_space, from_meta);
+        let (to_center, to_scale) = self.space_transform(ds, to_space, to_meta);
+        let from_pos = if let Some(pos) = from_override {
+            if pos.len() == n * 2 {
+                pos
+            } else {
+                ds.space_f32_2d(from_space).ok()?
+            }
+        } else {
+            ds.space_f32_2d(from_space).ok()?
+        };
+        let to_pos = if let Some(pos) = to_override {
+            if pos.len() == n * 2 {
+                pos
+            } else {
+                ds.space_f32_2d(to_space).ok()?
+            }
+        } else {
+            ds.space_f32_2d(to_space).ok()?
+        };
+        let t = apply_ease(segment_t.clamp(0.0, 1.0), self.ease_mode);
+        let mut bbox = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
+        let mut any = false;
+        for idx in draw_indices {
+            let i = *idx as usize;
+            if i >= n {
+                continue;
+            }
+            let base = i * 2;
+            let xf = (from_pos[base] - from_center[0]) * from_scale;
+            let yf = (from_pos[base + 1] - from_center[1]) * from_scale;
+            let xt = (to_pos[base] - to_center[0]) * to_scale;
+            let yt = (to_pos[base + 1] - to_center[1]) * to_scale;
+            let x = xf + (xt - xf) * t;
+            let y = yf + (yt - yf) * t;
+            if !x.is_finite() || !y.is_finite() {
+                continue;
+            }
+            any = true;
+            if x < bbox[0] {
+                bbox[0] = x;
+            }
+            if y < bbox[1] {
+                bbox[1] = y;
+            }
+            if x > bbox[2] {
+                bbox[2] = x;
+            }
+            if y > bbox[3] {
+                bbox[3] = y;
+            }
+        }
+        if any {
+            Some(bbox)
+        } else {
+            None
+        }
     }
 
     fn export_fit_bbox(&mut self, ds: &Dataset) -> Option<[f32; 4]> {
@@ -4224,7 +4848,12 @@ Then add that path to your system environment variables (PATH).";
         best
     }
 
-    fn space_transform(&mut self, ds: &Dataset, space_idx: usize, space: &crate::data::SpaceMeta) -> ([f32; 2], f32) {
+    fn space_transform(
+        &mut self,
+        ds: &Dataset,
+        space_idx: usize,
+        space: &crate::data::SpaceMeta,
+    ) -> ([f32; 2], f32) {
         let bbox = self.effective_bbox(ds, space_idx, space);
         let min_x = bbox[0];
         let min_y = bbox[1];
@@ -4237,7 +4866,12 @@ Then add that path to your system environment variables (PATH).";
         (center, scale)
     }
 
-    fn space_bbox_for_view(&mut self, ds: &Dataset, space_idx: usize, space: &crate::data::SpaceMeta) -> [f32; 4] {
+    fn space_bbox_for_view(
+        &mut self,
+        ds: &Dataset,
+        space_idx: usize,
+        space: &crate::data::SpaceMeta,
+    ) -> [f32; 4] {
         let bbox = self.effective_bbox(ds, space_idx, space);
         let min_x = bbox[0];
         let min_y = bbox[1];
@@ -4272,11 +4906,13 @@ Then add that path to your system environment variables (PATH).";
             return None;
         }
         let obs_idx = self.sample_grid_obs_idx?;
+        let filter_sig = self.sample_grid_filter_signature(obs_idx);
         let key = GridCacheKey {
             dataset_id: self.dataset_id,
             space_idx,
             obs_idx,
             use_filter: self.sample_grid_use_filter,
+            filter_sig,
             version: self.grid_version,
         };
         if let Some(cache) = &self.grid_cache {
@@ -4290,22 +4926,9 @@ Then add that path to your system environment variables (PATH).";
             return None;
         }
 
-        let mut selected: Vec<usize> = if self.sample_grid_use_filter {
-            if let Some(state) = self.category_state.get(&obs_idx) {
-                state.iter().enumerate().filter_map(|(i, v)| if *v { Some(i) } else { None }).collect()
-            } else {
-                (0..categories.len()).collect()
-            }
-        } else {
-            (0..categories.len()).collect()
-        };
-        if selected.is_empty() {
-            selected = (0..categories.len()).collect();
-        }
-
-        let n_sel = selected.len().max(1);
+        let n_sel = categories.len().max(1);
         let mut map = vec![-1i32; categories.len()];
-        for (i, &cat) in selected.iter().enumerate() {
+        for (i, cat) in (0..categories.len()).enumerate() {
             if cat < map.len() {
                 map[cat] = i as i32;
             }
@@ -4382,7 +5005,12 @@ Then add that path to your system environment variables (PATH).";
         }
 
         let mut out = vec![0.0f32; pos.len()];
-        let mut bbox = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+        let mut bbox = [
+            f32::INFINITY,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NEG_INFINITY,
+        ];
         for i in 0..n {
             let mut x = pos[i * 2];
             let mut y = pos[i * 2 + 1];
@@ -4424,12 +5052,19 @@ Then add that path to your system environment variables (PATH).";
                 let h = (space.bbox[3] - space.bbox[1]).max(1e-6);
                 max_dim = max_dim.max(w.max(h));
             }
-            let grid_dim = (bbox[2] - bbox[0]).max(1e-6).max((bbox[3] - bbox[1]).max(1e-6));
+            let grid_dim = (bbox[2] - bbox[0])
+                .max(1e-6)
+                .max((bbox[3] - bbox[1]).max(1e-6));
             if max_dim > grid_dim {
                 let scale = max_dim / grid_dim;
                 let cx = 0.5 * (bbox[0] + bbox[2]);
                 let cy = 0.5 * (bbox[1] + bbox[3]);
-                bbox = [f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY];
+                bbox = [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ];
                 for i in 0..n {
                     let x = cx + (out[i * 2] - cx) * scale;
                     let y = cy + (out[i * 2 + 1] - cy) * scale;
@@ -4469,10 +5104,7 @@ Then add that path to your system environment variables (PATH).";
         }
     }
 
-    fn sample_grid_label_positions(
-        &self,
-        ds: &Dataset,
-    ) -> Option<Vec<(String, [f32; 2])>> {
+    fn sample_grid_label_positions(&self, ds: &Dataset) -> Option<Vec<(String, [f32; 2])>> {
         if !self.sample_grid_enabled || !self.sample_grid_labels_enabled {
             return None;
         }
@@ -4482,26 +5114,21 @@ Then add that path to your system environment variables (PATH).";
         if categories.len() > MAX_GRID_CATEGORIES {
             return None;
         }
-        let mut selected: Vec<usize> = if self.sample_grid_use_filter {
+        let mut enabled = vec![true; categories.len()];
+        if self.sample_grid_use_filter {
             if let Some(state) = self.category_state.get(&obs_idx) {
-                state
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, v)| if *v { Some(i) } else { None })
-                    .collect()
-            } else {
-                (0..categories.len()).collect()
+                for (i, slot) in enabled.iter_mut().enumerate() {
+                    *slot = state.get(i).copied().unwrap_or(true);
+                }
             }
-        } else {
-            (0..categories.len()).collect()
-        };
-        if selected.is_empty() {
-            selected = (0..categories.len()).collect();
+            if enabled.iter().all(|v| !*v) {
+                enabled.fill(true);
+            }
         }
 
-        let n_sel = selected.len().max(1);
+        let n_sel = categories.len().max(1);
         let mut map = vec![-1i32; categories.len()];
-        for (i, &cat) in selected.iter().enumerate() {
+        for (i, cat) in (0..categories.len()).enumerate() {
             if cat < map.len() {
                 map[cat] = i as i32;
             }
@@ -4575,7 +5202,10 @@ Then add that path to your system environment variables (PATH).";
         }
 
         let mut out = Vec::with_capacity(n_sel);
-        for (i, &cat_idx) in selected.iter().enumerate() {
+        for cat_idx in 0..categories.len() {
+            if !enabled.get(cat_idx).copied().unwrap_or(true) {
+                continue;
+            }
             let mut label = categories
                 .get(cat_idx)
                 .cloned()
@@ -4590,6 +5220,7 @@ Then add that path to your system environment variables (PATH).";
                     }
                 }
             }
+            let i = map[cat_idx].max(0) as usize;
             let label_pos = [offsets[i][0], offsets[i][1] + tile_h * 0.55];
             out.push((label, label_pos));
         }
@@ -4664,9 +5295,7 @@ Then add that path to your system environment variables (PATH).";
             self.key_collapsed = vec![false];
             return;
         }
-        self.key_times = (0..len)
-            .map(|i| i as f32 / (len as f32 - 1.0))
-            .collect();
+        self.key_times = (0..len).map(|i| i as f32 / (len as f32 - 1.0)).collect();
         if self.key_collapsed.len() != len {
             self.key_collapsed.resize(len, false);
         }
@@ -4788,9 +5417,13 @@ Then add that path to your system environment variables (PATH).";
                     let li = lab as usize;
                     let c = if too_many {
                         let idx = if pal.is_empty() { 0 } else { li % pal.len() };
-                        pal.get(idx).copied().unwrap_or(pack_rgba8(200, 200, 200, 255))
+                        pal.get(idx)
+                            .copied()
+                            .unwrap_or(pack_rgba8(200, 200, 200, 255))
                     } else {
-                        pal.get(li).copied().unwrap_or(pack_rgba8(200, 200, 200, 255))
+                        pal.get(li)
+                            .copied()
+                            .unwrap_or(pack_rgba8(200, 200, 200, 255))
                     };
                     if (c >> 24) & 0xFF != 255 {
                         opaque = false;
@@ -4819,7 +5452,7 @@ Then add that path to your system environment variables (PATH).";
                     min: vmin,
                     max: vmax,
                 });
-                Some((colors, legend, true))
+                Some((colors, legend, vals.iter().all(|v| v.is_finite())))
             }
             ColorKey::Gene(name) => {
                 let gene = name.trim();
@@ -4842,7 +5475,7 @@ Then add that path to your system environment variables (PATH).";
                     min: vmin,
                     max: vmax,
                 });
-                Some((colors, legend, true))
+                Some((colors, legend, vec.iter().all(|v| v.is_finite())))
             }
         }
     }
@@ -4953,7 +5586,10 @@ Then add that path to your system environment variables (PATH).";
             let y_color = egui::Color32::from_rgb(90, 220, 140);
 
             painter.line_segment([origin, origin + egui::vec2(axis_len, 0.0)], (1.2, x_color));
-            painter.line_segment([origin, origin + egui::vec2(0.0, -axis_len)], (1.2, y_color));
+            painter.line_segment(
+                [origin, origin + egui::vec2(0.0, -axis_len)],
+                (1.2, y_color),
+            );
             painter.text(
                 origin + egui::vec2(axis_len + 4.0, 0.0),
                 egui::Align2::LEFT_CENTER,
@@ -5008,8 +5644,7 @@ Then add that path to your system environment variables (PATH).";
                 (pos[1] - self.camera.center[1]) * self.camera.pixels_per_unit
                     + 0.5 * viewport_px[1],
             ];
-            let screen = rect.min
-                + egui::vec2(screen_px[0] / ppp, screen_px[1] / ppp);
+            let screen = rect.min + egui::vec2(screen_px[0] / ppp, screen_px[1] / ppp);
             painter.text(
                 screen,
                 egui::Align2::CENTER_BOTTOM,
@@ -5018,7 +5653,6 @@ Then add that path to your system environment variables (PATH).";
                 color,
             );
         }
-
     }
 
     fn viewport_fullscreen_overlay(&mut self, ctx: &egui::Context) {
@@ -5093,15 +5727,27 @@ Then add that path to your system environment variables (PATH).";
                     {
                         self.playing = !self.playing;
                     }
-                    if ui.button("Stop").on_hover_text("Stop and rewind to t = 0.").clicked() {
+                    if ui
+                        .button("Stop")
+                        .on_hover_text("Stop and rewind to t = 0.")
+                        .clicked()
+                    {
                         self.playing = false;
                         self.play_direction = 1.0;
                         self.t = 0.0;
                     }
-                    if ui.button("Step -").on_hover_text("Step back a bit.").clicked() {
+                    if ui
+                        .button("Step -")
+                        .on_hover_text("Step back a bit.")
+                        .clicked()
+                    {
                         self.t = (self.t - 0.01).clamp(0.0, 1.0);
                     }
-                    if ui.button("Step +").on_hover_text("Step forward a bit.").clicked() {
+                    if ui
+                        .button("Step +")
+                        .on_hover_text("Step forward a bit.")
+                        .clicked()
+                    {
                         self.t = (self.t + 0.01).clamp(0.0, 1.0);
                     }
                 });
@@ -5114,9 +5760,17 @@ Then add that path to your system environment variables (PATH).";
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.playback_mode, PlaybackMode::Once, "Once");
                     ui.selectable_value(&mut self.playback_mode, PlaybackMode::Loop, "Loop");
-                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::PingPong, "Ping-pong");
+                    ui.selectable_value(
+                        &mut self.playback_mode,
+                        PlaybackMode::PingPong,
+                        "Ping-pong",
+                    );
                 });
-                let min_speed = if self.space_path.len() > 5 { 0.01 } else { 0.05 };
+                let min_speed = if self.space_path.len() > 5 {
+                    0.01
+                } else {
+                    0.05
+                };
                 if self.speed < min_speed {
                     self.speed = min_speed;
                 }
@@ -5137,9 +5791,21 @@ Then add that path to your system environment variables (PATH).";
                     .selected_text(ease_label)
                     .show_ui(ui, |ui| {
                         ui.selectable_value(&mut self.ease_mode, EaseMode::Linear, "Linear");
-                        ui.selectable_value(&mut self.ease_mode, EaseMode::Smoothstep, "Smoothstep");
-                        ui.selectable_value(&mut self.ease_mode, EaseMode::SineInOut, "Sine in-out");
-                        ui.selectable_value(&mut self.ease_mode, EaseMode::QuadInOut, "Quad in-out");
+                        ui.selectable_value(
+                            &mut self.ease_mode,
+                            EaseMode::Smoothstep,
+                            "Smoothstep",
+                        );
+                        ui.selectable_value(
+                            &mut self.ease_mode,
+                            EaseMode::SineInOut,
+                            "Sine in-out",
+                        );
+                        ui.selectable_value(
+                            &mut self.ease_mode,
+                            EaseMode::QuadInOut,
+                            "Quad in-out",
+                        );
                     });
             });
 
@@ -5173,7 +5839,32 @@ Then add that path to your system environment variables (PATH).";
                             }
                         });
                     if ui.button("Reset").clicked() {
-                        if let Some(space_idx) = self.space_path.get(self.reset_view_key_idx) {
+                        let (active_from, active_to, _color_from, _color_to, segment_t, _seg_idx) =
+                            self.current_segment(ds_ref);
+                        let mut from_override: Option<Arc<Vec<f32>>> = None;
+                        let mut to_override: Option<Arc<Vec<f32>>> = None;
+                        if let Some((pos, _bbox)) = self.grid_positions_for(ds_ref, active_from) {
+                            from_override = Some(pos);
+                        }
+                        if let Some((pos, _bbox)) = self.grid_positions_for(ds_ref, active_to) {
+                            to_override = Some(pos);
+                        }
+                        let draw_indices = self.draw_indices.clone();
+                        let bbox = self.current_plot_bbox_for_segment(
+                            ds_ref,
+                            active_from,
+                            active_to,
+                            segment_t,
+                            draw_indices.as_slice(),
+                            from_override.as_deref().map(|v| v.as_slice()),
+                            to_override.as_deref().map(|v| v.as_slice()),
+                        );
+                        if let Some(bbox) = bbox {
+                            let vp = self.last_viewport_points.size();
+                            let ppp = ctx.pixels_per_point();
+                            self.camera.fit_bbox(bbox, [vp.x * ppp, vp.y * ppp], 0.9);
+                        } else if let Some(space_idx) = self.space_path.get(self.reset_view_key_idx)
+                        {
                             if let Some(space) = ds_ref.meta.spaces.get(*space_idx) {
                                 let bbox = self.space_bbox_for_view(ds_ref, *space_idx, space);
                                 let vp = self.last_viewport_points.size();
@@ -5193,7 +5884,10 @@ Then add that path to your system environment variables (PATH).";
         let painter = ui.painter();
         let line_y = rect.center().y;
         painter.line_segment(
-            [egui::pos2(rect.left(), line_y), egui::pos2(rect.right(), line_y)],
+            [
+                egui::pos2(rect.left(), line_y),
+                egui::pos2(rect.right(), line_y),
+            ],
             (3.0, egui::Color32::from_gray(100)),
         );
 
@@ -5233,7 +5927,10 @@ Then add that path to your system environment variables (PATH).";
 
         let handle_x = rect.left() + self.t.clamp(0.0, 1.0) * rect.width();
         painter.line_segment(
-            [egui::pos2(handle_x, rect.top()), egui::pos2(handle_x, rect.bottom())],
+            [
+                egui::pos2(handle_x, rect.top()),
+                egui::pos2(handle_x, rect.bottom()),
+            ],
             (2.5, egui::Color32::from_rgb(100, 200, 255)),
         );
         if !marker_handled && (response.dragged() || response.clicked()) {
@@ -5245,7 +5942,11 @@ Then add that path to your system environment variables (PATH).";
 
         ui.horizontal(|ui| {
             ui.label("t");
-            ui.add(egui::DragValue::new(&mut self.t).speed(0.001).range(0.0..=1.0));
+            ui.add(
+                egui::DragValue::new(&mut self.t)
+                    .speed(0.001)
+                    .range(0.0..=1.0),
+            );
             ui.checkbox(&mut self.color_path_enabled, "Use color keys");
         });
 
@@ -5259,11 +5960,7 @@ Then add that path to your system environment variables (PATH).";
             {
                 if self.space_path.len() >= 2 {
                     let space = *self.space_path.last().unwrap_or(&0);
-                    let color = self
-                        .color_path
-                        .last()
-                        .cloned()
-                        .unwrap_or(ColorKey::Current);
+                    let color = self.color_path.last().cloned().unwrap_or(ColorKey::Current);
                     self.space_path.push(space);
                     self.color_path.push(color);
                     self.key_times.resize(self.space_path.len(), 0.0);
@@ -5317,7 +6014,6 @@ Then add that path to your system environment variables (PATH).";
                     self.sync_advanced_from_timeline();
                 }
             }
-
         });
 
         ui.horizontal(|ui| {
@@ -5398,54 +6094,55 @@ Then add that path to your system environment variables (PATH).";
                                         egui::vec2(0.0, 0.0),
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
-                                        let drag_handle = ui
-                                            .add(
-                                                egui::Button::new(
-                                                    egui::RichText::new("⋮⋮")
-                                                        .size(13.0)
-                                                        .strong()
-                                                        .color(ui.visuals().weak_text_color()),
+                                            let drag_handle = ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        egui::RichText::new("⋮⋮")
+                                                            .size(13.0)
+                                                            .strong()
+                                                            .color(ui.visuals().weak_text_color()),
+                                                    )
+                                                    .frame(false)
+                                                    .small()
+                                                    .sense(egui::Sense::drag()),
                                                 )
-                                                .frame(false)
-                                                .small()
-                                                .sense(egui::Sense::drag()),
-                                            )
-                                            .on_hover_text("Drag to reorder keyframes.")
-                                            .on_hover_and_drag_cursor(egui::CursorIcon::Grab);
-                                        drag_handle_resp = Some(drag_handle);
-                                        let header_resp = ui
-                                            .selectable_label(
-                                                is_selected,
-                                                egui::RichText::new(format!("Key {}", i + 1))
-                                                    .strong(),
-                                            )
-                                            .on_hover_text("Click to select this keyframe.");
-                                        if header_resp.clicked() {
-                                            self.selected_key_idx = Some(i);
-                                        }
-                                        let can_remove = self.space_path.len() > 2;
-                                        let delete_enabled = can_remove && self.confirm_delete_cards;
-                                        let delete_btn = ui
-                                            .add_enabled(
-                                                delete_enabled,
-                                                egui::Button::new("🗑").small(),
-                                            )
-                                            .on_hover_text(if self.confirm_delete_cards {
-                                                "Remove this keyframe."
-                                            } else {
-                                                "Enable Delete: yes to remove keyframes."
-                                            });
-                                        if delete_btn.clicked() {
-                                            remove_idx = Some(i);
-                                        }
-                                        if ui
-                                            .small_button(if collapsed { "▸" } else { "▾" })
-                                            .on_hover_text("Collapse/expand this keyframe.")
-                                            .clicked()
-                                        {
-                                            collapsed = !collapsed;
-                                        }
-                                    },
+                                                .on_hover_text("Drag to reorder keyframes.")
+                                                .on_hover_and_drag_cursor(egui::CursorIcon::Grab);
+                                            drag_handle_resp = Some(drag_handle);
+                                            let header_resp = ui
+                                                .selectable_label(
+                                                    is_selected,
+                                                    egui::RichText::new(format!("Key {}", i + 1))
+                                                        .strong(),
+                                                )
+                                                .on_hover_text("Click to select this keyframe.");
+                                            if header_resp.clicked() {
+                                                self.selected_key_idx = Some(i);
+                                            }
+                                            let can_remove = self.space_path.len() > 2;
+                                            let delete_enabled =
+                                                can_remove && self.confirm_delete_cards;
+                                            let delete_btn = ui
+                                                .add_enabled(
+                                                    delete_enabled,
+                                                    egui::Button::new("🗑").small(),
+                                                )
+                                                .on_hover_text(if self.confirm_delete_cards {
+                                                    "Remove this keyframe."
+                                                } else {
+                                                    "Enable Delete: yes to remove keyframes."
+                                                });
+                                            if delete_btn.clicked() {
+                                                remove_idx = Some(i);
+                                            }
+                                            if ui
+                                                .small_button(if collapsed { "▸" } else { "▾" })
+                                                .on_hover_text("Collapse/expand this keyframe.")
+                                                .clicked()
+                                            {
+                                                collapsed = !collapsed;
+                                            }
+                                        },
                                     );
 
                                     if let Some(drag_handle) = drag_handle_resp {
@@ -5476,8 +6173,10 @@ Then add that path to your system environment variables (PATH).";
                                             ColorKey::Gene(name) => format!("Gene: {name}"),
                                         };
                                         ui.label(
-                                            egui::RichText::new(format!("{space_name} | {color_desc}"))
-                                                .size(10.5),
+                                            egui::RichText::new(format!(
+                                                "{space_name} | {color_desc}"
+                                            ))
+                                            .size(10.5),
                                         );
                                         ui.spacing_mut().item_spacing = prev_spacing;
                                         return;
@@ -5488,61 +6187,67 @@ Then add that path to your system environment variables (PATH).";
                                         egui::vec2(0.0, 0.0),
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
-                                        ui.label(egui::RichText::new("Space").size(10.5));
-                                        egui::ComboBox::from_id_salt(("kf_space", i))
-                                            .width(control_width)
-                                            .selected_text(
-                                                ds_ref
-                                                    .meta
-                                                    .spaces
-                                                    .get(space_idx)
-                                                    .map(|s| s.name.as_str())
-                                                    .unwrap_or("?"),
-                                            )
-                                            .show_ui(ui, |ui| {
-                                                for (j, s) in ds_ref.meta.spaces.iter().enumerate() {
-                                                    ui.selectable_value(&mut space_idx, j, &s.name);
-                                                }
-                                            });
-                                    },
+                                            ui.label(egui::RichText::new("Space").size(10.5));
+                                            egui::ComboBox::from_id_salt(("kf_space", i))
+                                                .width(control_width)
+                                                .selected_text(
+                                                    ds_ref
+                                                        .meta
+                                                        .spaces
+                                                        .get(space_idx)
+                                                        .map(|s| s.name.as_str())
+                                                        .unwrap_or("?"),
+                                                )
+                                                .show_ui(ui, |ui| {
+                                                    for (j, s) in
+                                                        ds_ref.meta.spaces.iter().enumerate()
+                                                    {
+                                                        ui.selectable_value(
+                                                            &mut space_idx,
+                                                            j,
+                                                            &s.name,
+                                                        );
+                                                    }
+                                                });
+                                        },
                                     );
                                     ui.allocate_ui_with_layout(
                                         egui::vec2(0.0, 0.0),
                                         egui::Layout::left_to_right(egui::Align::Center),
                                         |ui| {
-                                        ui.label(egui::RichText::new("Color").size(10.5));
-                                        let kind_label = match color_kind {
-                                            KeyColorKind::Current => "Current",
-                                            KeyColorKind::Categorical => "Categorical",
-                                            KeyColorKind::Continuous => "Continuous",
-                                            KeyColorKind::Gene => "Gene",
-                                        };
-                                        egui::ComboBox::from_id_salt(("kf_color_kind", i))
-                                            .width(control_width)
-                                            .selected_text(kind_label)
-                                            .show_ui(ui, |ui| {
-                                                ui.selectable_value(
-                                                    &mut color_kind,
-                                                    KeyColorKind::Current,
-                                                    "Current",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut color_kind,
-                                                    KeyColorKind::Categorical,
-                                                    "Categorical",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut color_kind,
-                                                    KeyColorKind::Continuous,
-                                                    "Continuous",
-                                                );
-                                                ui.selectable_value(
-                                                    &mut color_kind,
-                                                KeyColorKind::Gene,
-                                                "Gene",
-                                            );
-                                        });
-                                    },
+                                            ui.label(egui::RichText::new("Color").size(10.5));
+                                            let kind_label = match color_kind {
+                                                KeyColorKind::Current => "Current",
+                                                KeyColorKind::Categorical => "Categorical",
+                                                KeyColorKind::Continuous => "Continuous",
+                                                KeyColorKind::Gene => "Gene",
+                                            };
+                                            egui::ComboBox::from_id_salt(("kf_color_kind", i))
+                                                .width(control_width)
+                                                .selected_text(kind_label)
+                                                .show_ui(ui, |ui| {
+                                                    ui.selectable_value(
+                                                        &mut color_kind,
+                                                        KeyColorKind::Current,
+                                                        "Current",
+                                                    );
+                                                    ui.selectable_value(
+                                                        &mut color_kind,
+                                                        KeyColorKind::Categorical,
+                                                        "Categorical",
+                                                    );
+                                                    ui.selectable_value(
+                                                        &mut color_kind,
+                                                        KeyColorKind::Continuous,
+                                                        "Continuous",
+                                                    );
+                                                    ui.selectable_value(
+                                                        &mut color_kind,
+                                                        KeyColorKind::Gene,
+                                                        "Gene",
+                                                    );
+                                                });
+                                        },
                                     );
 
                                     match color_kind {
@@ -5621,7 +6326,10 @@ Then add that path to your system environment variables (PATH).";
                                                     .desired_width(control_width);
                                                 ui.add(edit);
                                                 if !gene.trim().is_empty()
-                                                    && !expr.var_names.iter().any(|name| name == &gene)
+                                                    && !expr
+                                                        .var_names
+                                                        .iter()
+                                                        .any(|name| name == &gene)
                                                 {
                                                     ui.label("No exact match.");
                                                 }
@@ -5670,7 +6378,10 @@ Then add that path to your system environment variables (PATH).";
                 };
                 let line_color = egui::Color32::from_rgb(120, 200, 255);
                 ui.painter().line_segment(
-                    [egui::pos2(line_x, target_rect.top()), egui::pos2(line_x, target_rect.bottom())],
+                    [
+                        egui::pos2(line_x, target_rect.top()),
+                        egui::pos2(line_x, target_rect.bottom()),
+                    ],
                     egui::Stroke::new(2.0, line_color),
                 );
             }
@@ -5683,8 +6394,7 @@ Then add that path to your system environment variables (PATH).";
                 let card_fill = ui.visuals().widgets.inactive.bg_fill;
                 let card_stroke = ui.visuals().widgets.active.bg_stroke;
                 let text_color = ui.visuals().text_color();
-                ui.painter()
-                    .rect_filled(shadow_rect, 6.0, shadow_color);
+                ui.painter().rect_filled(shadow_rect, 6.0, shadow_color);
                 ui.painter().rect_filled(float_rect, 6.0, card_fill);
                 ui.painter()
                     .rect_stroke(float_rect, 6.0, card_stroke, egui::StrokeKind::Inside);
@@ -5869,10 +6579,7 @@ Then add that path to your system environment variables (PATH).";
                     egui::ViewportCommand::Fullscreen(!is_fullscreen),
                 );
                 if !is_fullscreen {
-                    ctx.send_viewport_cmd_to(
-                        viewport_id,
-                        egui::ViewportCommand::Maximized(true),
-                    );
+                    ctx.send_viewport_cmd_to(viewport_id, egui::ViewportCommand::Maximized(true));
                 }
             }
             let maximize_label = if is_maximized {
@@ -5992,8 +6699,7 @@ Then add that path to your system environment variables (PATH).";
                 .get(connect.from_idx)
                 .map(|card| (card_positions[connect.from_idx], card.size))
             {
-                let rect =
-                    egui::Rect::from_min_size(canvas_rect.min + pos.to_vec2(), size);
+                let rect = egui::Rect::from_min_size(canvas_rect.min + pos.to_vec2(), size);
                 connect.start_pos = if connect.from_is_output {
                     egui::pos2(rect.right(), rect.center().y)
                 } else {
@@ -6001,8 +6707,7 @@ Then add that path to your system environment variables (PATH).";
                 };
             }
         }
-        let connection_stroke =
-            egui::Stroke::new(1.4, ui.visuals().selection.stroke.color);
+        let connection_stroke = egui::Stroke::new(1.4, ui.visuals().selection.stroke.color);
         {
             let painter = ui.painter();
             for conn in &self.advanced_connections {
@@ -6040,10 +6745,7 @@ Then add that path to your system environment variables (PATH).";
         let mut remove_indices: Vec<usize> = Vec::new();
         for (i, card) in self.advanced_cards.iter_mut().enumerate() {
             card.pos = constrain_card_pos(card.pos, card.size, canvas_rect, inspector_rect);
-            let rect = egui::Rect::from_min_size(
-                canvas_rect.min + card.pos.to_vec2(),
-                card.size,
-            );
+            let rect = egui::Rect::from_min_size(canvas_rect.min + card.pos.to_vec2(), card.size);
             let selected = selected_card == Some(i);
             let fill = if selected {
                 ui.visuals().widgets.active.bg_fill
@@ -6086,8 +6788,16 @@ Then add that path to your system environment variables (PATH).";
                 );
                 let node_color = ui.visuals().selection.bg_fill;
                 let disabled_color = ui.visuals().widgets.noninteractive.fg_stroke.color;
-                let in_color = if card.in_enabled { node_color } else { disabled_color };
-                let out_color = if card.out_enabled { node_color } else { disabled_color };
+                let in_color = if card.in_enabled {
+                    node_color
+                } else {
+                    disabled_color
+                };
+                let out_color = if card.out_enabled {
+                    node_color
+                } else {
+                    disabled_color
+                };
                 painter.circle_filled(in_pos, node_r, in_color);
                 painter.circle_filled(out_pos, node_r, out_color);
                 painter.circle_stroke(in_pos, node_r, egui::Stroke::new(1.0, stroke.color));
@@ -6126,14 +6836,14 @@ Then add that path to your system environment variables (PATH).";
                 ui.scope_builder(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
                     ui.set_min_size(inner_rect.size());
                     ui.spacing_mut().item_spacing = egui::vec2(4.0, 2.0);
-                render_advanced_card_controls(
-                    ui,
-                    card,
-                    ds_opt.as_deref(),
-                    &categorical_opts,
-                    &continuous_opts,
-                    110.0,
-                );
+                    render_advanced_card_controls(
+                        ui,
+                        card,
+                        ds_opt.as_deref(),
+                        &categorical_opts,
+                        &continuous_opts,
+                        110.0,
+                    );
                 });
             }
 
@@ -6209,8 +6919,7 @@ Then add that path to your system environment variables (PATH).";
                 if response.drag_started() {
                     card_drag_started = true;
                     if selected_cards.contains(&i) && selected_cards.len() > 1 {
-                        start_group_drag =
-                            response.interact_pointer_pos().or(pointer_pos);
+                        start_group_drag = response.interact_pointer_pos().or(pointer_pos);
                         drag_idx = Some(i);
                     } else {
                         drag_idx = Some(i);
@@ -6311,8 +7020,7 @@ Then add that path to your system environment variables (PATH).";
         if let (Some(start), Some(pos)) = (marquee_start, pointer_pos) {
             if ctx.input(|i| i.pointer.any_down()) {
                 selected_cards.clear();
-                let selection_rect =
-                    egui::Rect::from_two_pos(start, pos).intersect(canvas_rect);
+                let selection_rect = egui::Rect::from_two_pos(start, pos).intersect(canvas_rect);
                 let painter = ui.painter();
                 painter.rect_filled(
                     selection_rect,
@@ -6326,10 +7034,8 @@ Then add that path to your system environment variables (PATH).";
                     egui::StrokeKind::Inside,
                 );
                 for (i, card) in self.advanced_cards.iter().enumerate() {
-                    let card_rect = egui::Rect::from_min_size(
-                        canvas_rect.min + card.pos.to_vec2(),
-                        card.size,
-                    );
+                    let card_rect =
+                        egui::Rect::from_min_size(canvas_rect.min + card.pos.to_vec2(), card.size);
                     if selection_rect.intersects(card_rect) {
                         selected_cards.insert(i);
                     }
@@ -6361,7 +7067,8 @@ Then add that path to your system environment variables (PATH).";
                                     .iter()
                                     .any(|c| c.from == from && c.to == to)
                             {
-                                self.advanced_connections.push(AdvancedConnection { from, to });
+                                self.advanced_connections
+                                    .push(AdvancedConnection { from, to });
                             }
                         } else if !connect.from_is_output && target_is_output {
                             let from = target_idx;
@@ -6372,7 +7079,8 @@ Then add that path to your system environment variables (PATH).";
                                     .iter()
                                     .any(|c| c.from == from && c.to == to)
                             {
-                                self.advanced_connections.push(AdvancedConnection { from, to });
+                                self.advanced_connections
+                                    .push(AdvancedConnection { from, to });
                             }
                         }
                     }
@@ -6409,154 +7117,149 @@ Then add that path to your system environment variables (PATH).";
                     spread: 1,
                 };
                 frame.show(ui, |ui| {
-                        ui.set_min_size(inspector_size);
-                        ui.label("Card inspector");
-                        if selected_cards.len() > 1 {
-                            ui.label(format!("{} cards selected", selected_cards.len()));
-                            if ui.button("Remove selected cards").clicked() {
-                                remove_indices.extend(selected_cards.iter().copied());
+                    ui.set_min_size(inspector_size);
+                    ui.label("Card inspector");
+                    if selected_cards.len() > 1 {
+                        ui.label(format!("{} cards selected", selected_cards.len()));
+                        if ui.button("Remove selected cards").clicked() {
+                            remove_indices.extend(selected_cards.iter().copied());
+                        }
+                    } else if let Some(idx) = self.advanced_selected_card {
+                        if let Some(card) = self.advanced_cards.get_mut(idx) {
+                            if ui.button("Remove card").clicked() {
+                                remove_idx = Some(idx);
                             }
-                        } else if let Some(idx) = self.advanced_selected_card {
-                            if let Some(card) = self.advanced_cards.get_mut(idx) {
-                                if ui.button("Remove card").clicked() {
-                                    remove_idx = Some(idx);
-                                }
-                                render_advanced_card_controls(
-                                    ui,
-                                    card,
-                                    ds_opt.as_deref(),
-                                    &categorical_opts,
-                                    &continuous_opts,
-                                    150.0,
+                            render_advanced_card_controls(
+                                ui,
+                                card,
+                                ds_opt.as_deref(),
+                                &categorical_opts,
+                                &continuous_opts,
+                                150.0,
+                            );
+                            ui.horizontal(|ui| {
+                                ui.label("Duration");
+                                ui.add(
+                                    egui::DragValue::new(&mut card.duration_sec)
+                                        .speed(0.05)
+                                        .range(0.1..=30.0)
+                                        .suffix("s"),
                                 );
-                                ui.horizontal(|ui| {
-                                    ui.label("Duration");
-                                    ui.add(
-                                        egui::DragValue::new(&mut card.duration_sec)
-                                            .speed(0.05)
-                                            .range(0.1..=30.0)
-                                            .suffix("s"),
-                                    );
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.checkbox(&mut card.in_enabled, "In");
-                                    ui.checkbox(&mut card.out_enabled, "Out");
-                                });
+                            });
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut card.in_enabled, "In");
+                                ui.checkbox(&mut card.out_enabled, "Out");
+                            });
 
-                                let mut filter_enabled = card.filter.is_some();
-                                if ui.checkbox(&mut filter_enabled, "Filter").changed() {
-                                    if filter_enabled {
-                                        let obs_idx = categorical_opts
-                                            .first()
-                                            .map(|(idx, _)| *idx)
-                                            .unwrap_or(0);
-                                        card.filter = Some(AdvancedCardFilter {
-                                            obs_idx,
-                                            enabled: Vec::new(),
-                                            cached_indices: None,
-                                            cached_indices_id: 0,
-                                            cached_dataset_id: 0,
-                                        });
-                                    } else {
-                                        card.filter = None;
-                                        if self.advanced_preview_card == Some(idx) {
-                                            self.advanced_preview_card = None;
-                                        }
+                            let mut filter_enabled = card.filter.is_some();
+                            if ui.checkbox(&mut filter_enabled, "Filter").changed() {
+                                if filter_enabled {
+                                    let obs_idx =
+                                        categorical_opts.first().map(|(idx, _)| *idx).unwrap_or(0);
+                                    card.filter = Some(AdvancedCardFilter {
+                                        obs_idx,
+                                        enabled: Vec::new(),
+                                        cached_indices: None,
+                                        cached_indices_id: 0,
+                                        cached_dataset_id: 0,
+                                        cached_max_draw: 0,
+                                    });
+                                } else {
+                                    card.filter = None;
+                                    if self.advanced_preview_card == Some(idx) {
+                                        self.advanced_preview_card = None;
                                     }
                                 }
-                                if let Some(filter) = card.filter.as_mut() {
-                                    if categorical_opts.is_empty() {
-                                        ui.label("No categorical obs.");
-                                    } else if let Some(ds) = ds_opt.as_ref() {
-                                        let mut obs_idx = filter.obs_idx;
-                                        egui::ComboBox::from_id_salt(("adv_filter_obs", card.id))
-                                            .selected_text(
-                                                categorical_opts
-                                                    .iter()
-                                                    .find(|(idx, _)| *idx == obs_idx)
-                                                    .map(|(_, name)| name.as_str())
-                                                    .unwrap_or("Categorical"),
-                                            )
-                                            .show_ui(ui, |ui| {
-                                                for (idx, name) in &categorical_opts {
-                                                    ui.selectable_value(
-                                                        &mut obs_idx,
-                                                        *idx,
-                                                        name,
-                                                    );
-                                                }
-                                            });
-                                        if obs_idx != filter.obs_idx {
-                                            filter.obs_idx = obs_idx;
-                                            filter.enabled.clear();
+                            }
+                            if let Some(filter) = card.filter.as_mut() {
+                                if categorical_opts.is_empty() {
+                                    ui.label("No categorical obs.");
+                                } else if let Some(ds) = ds_opt.as_ref() {
+                                    let mut obs_idx = filter.obs_idx;
+                                    egui::ComboBox::from_id_salt(("adv_filter_obs", card.id))
+                                        .selected_text(
+                                            categorical_opts
+                                                .iter()
+                                                .find(|(idx, _)| *idx == obs_idx)
+                                                .map(|(_, name)| name.as_str())
+                                                .unwrap_or("Categorical"),
+                                        )
+                                        .show_ui(ui, |ui| {
+                                            for (idx, name) in &categorical_opts {
+                                                ui.selectable_value(&mut obs_idx, *idx, name);
+                                            }
+                                        });
+                                    if obs_idx != filter.obs_idx {
+                                        filter.obs_idx = obs_idx;
+                                        filter.enabled.clear();
+                                        filter.cached_indices = None;
+                                        filter.cached_indices_id = 0;
+                                        filter.cached_dataset_id = 0;
+                                        filter.cached_max_draw = 0;
+                                    }
+                                    if let Ok((_name, _labels, categories, _pal)) =
+                                        ds.obs_categorical(filter.obs_idx)
+                                    {
+                                        if filter.enabled.len() != categories.len() {
+                                            filter.enabled = vec![true; categories.len()];
                                             filter.cached_indices = None;
                                             filter.cached_indices_id = 0;
                                             filter.cached_dataset_id = 0;
+                                            filter.cached_max_draw = 0;
                                         }
-                                        if let Ok((_name, _labels, categories, _pal)) =
-                                            ds.obs_categorical(filter.obs_idx)
-                                        {
-                                            if filter.enabled.len() != categories.len() {
-                                                filter.enabled = vec![true; categories.len()];
+                                        ui.horizontal(|ui| {
+                                            if ui.button("All").clicked() {
+                                                for v in &mut filter.enabled {
+                                                    *v = true;
+                                                }
                                                 filter.cached_indices = None;
                                                 filter.cached_indices_id = 0;
                                                 filter.cached_dataset_id = 0;
+                                                filter.cached_max_draw = 0;
                                             }
-                                            ui.horizontal(|ui| {
-                                                if ui.button("All").clicked() {
-                                                    for v in &mut filter.enabled {
-                                                        *v = true;
-                                                    }
-                                                    filter.cached_indices = None;
-                                                    filter.cached_indices_id = 0;
-                                                    filter.cached_dataset_id = 0;
+                                            if ui.button("None").clicked() {
+                                                for v in &mut filter.enabled {
+                                                    *v = false;
                                                 }
-                                                if ui.button("None").clicked() {
-                                                    for v in &mut filter.enabled {
-                                                        *v = false;
-                                                    }
-                                                    filter.cached_indices = None;
-                                                    filter.cached_indices_id = 0;
-                                                    filter.cached_dataset_id = 0;
-                                                }
-                                                if ui.button("Preview").clicked() {
-                                                    preview_card = Some(idx);
+                                                filter.cached_indices = None;
+                                                filter.cached_indices_id = 0;
+                                                filter.cached_dataset_id = 0;
+                                                filter.cached_max_draw = 0;
+                                            }
+                                            if ui.button("Preview").clicked() {
+                                                preview_card = Some(idx);
+                                            }
+                                        });
+                                        let row_height = 22.0;
+                                        let list_max =
+                                            row_height * categories.len().min(10) as f32 + 6.0;
+                                        egui::ScrollArea::vertical()
+                                            .max_height(list_max)
+                                            .auto_shrink([false, false])
+                                            .show(ui, |ui| {
+                                                for (idx, name) in categories.iter().enumerate() {
+                                                    ui.horizontal(|ui| {
+                                                        if ui
+                                                            .checkbox(&mut filter.enabled[idx], "")
+                                                            .changed()
+                                                        {
+                                                            filter.cached_indices = None;
+                                                            filter.cached_indices_id = 0;
+                                                            filter.cached_dataset_id = 0;
+                                                            filter.cached_max_draw = 0;
+                                                        }
+                                                        ui.label(name);
+                                                    });
                                                 }
                                             });
-                                            let row_height = 22.0;
-                                            let list_max =
-                                                row_height * categories.len().min(10) as f32 + 6.0;
-                                            egui::ScrollArea::vertical()
-                                                .max_height(list_max)
-                                                .auto_shrink([false, false])
-                                                .show(ui, |ui| {
-                                                    for (idx, name) in
-                                                        categories.iter().enumerate()
-                                                    {
-                                                        ui.horizontal(|ui| {
-                                                            if ui
-                                                                .checkbox(
-                                                                    &mut filter.enabled[idx],
-                                                                    "",
-                                                                )
-                                                                .changed()
-                                                            {
-                                                                filter.cached_indices = None;
-                                                                filter.cached_indices_id = 0;
-                                                                filter.cached_dataset_id = 0;
-                                                            }
-                                                            ui.label(name);
-                                                        });
-                                                    }
-                                                });
-                                        }
                                     }
                                 }
                             }
-                        } else {
-                            ui.label("Select a card to edit its settings.");
                         }
-                    });
+                    } else {
+                        ui.label("Select a card to edit its settings.");
+                    }
+                });
             });
 
         if let Some(pos) = context_add_pos {
@@ -6614,7 +7317,6 @@ Then add that path to your system environment variables (PATH).";
         self.advanced_drag_group = group_drag;
         self.advanced_drag_pointer_start = group_drag_pointer;
         self.advanced_marquee_start = marquee_start;
-
     }
 
     fn add_advanced_card_at(
@@ -6636,7 +7338,11 @@ Then add that path to your system environment variables (PATH).";
             inspector_rect,
         );
         let id = self.next_advanced_id();
-        let space_idx = self.space_path.get(self.selected_key_idx.unwrap_or(0)).copied().unwrap_or(0);
+        let space_idx = self
+            .space_path
+            .get(self.selected_key_idx.unwrap_or(0))
+            .copied()
+            .unwrap_or(0);
         let color_key = self
             .color_path
             .get(self.selected_key_idx.unwrap_or(0))
@@ -6673,16 +7379,12 @@ Then add that path to your system environment variables (PATH).";
             let Some((card, right)) = rest.split_first_mut() else {
                 return;
             };
-            let mut rect = egui::Rect::from_min_size(
-                canvas_rect.min + card.pos.to_vec2(),
-                card.size,
-            );
+            let mut rect =
+                egui::Rect::from_min_size(canvas_rect.min + card.pos.to_vec2(), card.size);
             let mut moved = false;
             for other in left.iter().chain(right.iter()) {
-                let other_rect = egui::Rect::from_min_size(
-                    canvas_rect.min + other.pos.to_vec2(),
-                    other.size,
-                );
+                let other_rect =
+                    egui::Rect::from_min_size(canvas_rect.min + other.pos.to_vec2(), other.size);
                 if !rect.intersects(other_rect) {
                     continue;
                 }
@@ -6702,10 +7404,7 @@ Then add that path to your system environment variables (PATH).";
                     card.pos.y += move_y;
                 }
                 card.pos = constrain_card_pos(card.pos, card.size, canvas_rect, inspector_rect);
-                rect = egui::Rect::from_min_size(
-                    canvas_rect.min + card.pos.to_vec2(),
-                    card.size,
-                );
+                rect = egui::Rect::from_min_size(canvas_rect.min + card.pos.to_vec2(), card.size);
                 moved = true;
             }
             if !moved {
@@ -6722,7 +7421,9 @@ Then add that path to your system environment variables (PATH).";
             return;
         }
 
-        let step = (self.base_indices.len() as f32 / max_draw as f32).ceil().max(1.0) as usize;
+        let step = (self.base_indices.len() as f32 / max_draw as f32)
+            .ceil()
+            .max(1.0) as usize;
         let mut out = Vec::with_capacity(max_draw);
         for (i, idx) in self.base_indices.iter().enumerate() {
             if i % step == 0 {
@@ -6780,11 +7481,7 @@ Then add that path to your system environment variables (PATH).";
             for i in 0..key_count {
                 if let Some(card) = self.advanced_cards.get_mut(i) {
                     card.space_idx = self.space_path.get(i).copied().unwrap_or(0);
-                    card.color_key = self
-                        .color_path
-                        .get(i)
-                        .cloned()
-                        .unwrap_or(ColorKey::Current);
+                    card.color_key = self.color_path.get(i).cloned().unwrap_or(ColorKey::Current);
                     card.duration_sec = durations[i].max(0.1);
                 }
             }
@@ -7036,16 +7733,30 @@ impl eframe::App for StvizApp {
         self.update_main_view_refresh(ctx, frame);
         self.handle_screenshot_events(ctx);
         self.handle_hotkeys(ctx);
+        self.handle_dropped_files(ctx);
         self.poll_convert_job();
         if self.convert_running {
             self.refresh_convert_log();
         }
         self.maybe_update_playback(ctx);
+        let render_prepare_err = { self.shared.last_prepare_error.lock().take() };
+        if let Some(err) = render_prepare_err {
+            self.last_error = Some(err.clone());
+            if self.exporting_loop || self.export_finishing {
+                self.append_export_log(&err);
+                self.export_status = Some(format!("Export failed: {err}"));
+                self.exporting_loop = false;
+                self.export_finishing = false;
+                self.export_cancelled = false;
+                self.export_camera = None;
+                let frames_dir = self.export_dir.clone();
+                self.remove_export_frames(&frames_dir);
+                self.remove_export_output();
+            }
+        }
 
         if self.viewport_fullscreen {
-            let is_fullscreen = ctx
-                .input(|i| i.viewport().fullscreen)
-                .unwrap_or(false);
+            let is_fullscreen = ctx.input(|i| i.viewport().fullscreen).unwrap_or(false);
             if !is_fullscreen {
                 self.viewport_fullscreen = false;
             }
@@ -7056,6 +7767,7 @@ impl eframe::App for StvizApp {
                 self.ui_viewport(ui, ctx);
             });
             self.viewport_fullscreen_overlay(ctx);
+            self.ui_advanced_timeline(ctx);
             return;
         }
 
@@ -7070,9 +7782,11 @@ impl eframe::App for StvizApp {
             .default_width(320.0)
             .max_width(480.0)
             .show(ctx, |ui| {
-                egui::ScrollArea::vertical().auto_shrink([false; 2]).show(ui, |ui| {
-                    self.ui_left_panel(ui, ctx);
-                });
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show(ui, |ui| {
+                        self.ui_left_panel(ui, ctx);
+                    });
             });
 
         egui::TopBottomPanel::bottom("timeline_bar")
@@ -7130,7 +7844,7 @@ impl CallbackTrait for PointCloudCallback {
             return Vec::new();
         }
 
-        let _ = gpu.prepare(
+        match gpu.prepare(
             device,
             queue,
             p.target_format,
@@ -7149,7 +7863,15 @@ impl CallbackTrait for PointCloudCallback {
             p.from_override_id,
             p.to_override_id,
             p.uniforms,
-        );
+        ) {
+            Ok(()) => {
+                self.shared.last_prepare_error.lock().take();
+            }
+            Err(e) => {
+                *self.shared.last_prepare_error.lock() = Some(format!("GPU prepare failed: {e}"));
+                return Vec::new();
+            }
+        }
 
         Vec::new()
     }
@@ -7228,12 +7950,7 @@ fn save_rgba_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::R
         image::codecs::png::CompressionType::Best,
         image::codecs::png::FilterType::Adaptive,
     );
-    encoder.write_image(
-        rgba,
-        width,
-        height,
-        image::ExtendedColorType::Rgba8,
-    )?;
+    encoder.write_image(rgba, width, height, image::ExtendedColorType::Rgba8)?;
     Ok(())
 }
 
@@ -7247,10 +7964,17 @@ fn draw_gradient_legend(ui: &mut egui::Ui, label: &str, vmin: f32, vmax: f32) {
         let c = colorous::VIRIDIS.eval_continuous(t as f64);
         let color = egui::Color32::from_rgb(c.r, c.g, c.b);
         let x0 = rect.left() + seg_w * i as f32;
-        let seg = egui::Rect::from_min_size(egui::pos2(x0, rect.top()), egui::vec2(seg_w + 1.0, rect.height()));
+        let seg = egui::Rect::from_min_size(
+            egui::pos2(x0, rect.top()),
+            egui::vec2(seg_w + 1.0, rect.height()),
+        );
         ui.painter().rect_filled(seg, 0.0, color);
     }
-    ui.label(format!("Range: {} .. {}", format_scale_value(vmin), format_scale_value(vmax)));
+    ui.label(format!(
+        "Range: {} .. {}",
+        format_scale_value(vmin),
+        format_scale_value(vmax)
+    ));
 }
 
 fn apply_ease(t: f32, mode: EaseMode) -> f32 {
@@ -7321,12 +8045,7 @@ fn render_filter_rows(
             }
             if ui.color_edit_button_srgba(&mut color).changed() {
                 if i < overrides.len() {
-                    overrides[i] = Some(pack_rgba8(
-                        color.r(),
-                        color.g(),
-                        color.b(),
-                        color.a(),
-                    ));
+                    overrides[i] = Some(pack_rgba8(color.r(), color.g(), color.b(), color.a()));
                 }
                 *colors_changed = true;
             }
@@ -7395,29 +8114,67 @@ fn obs_name(ds: &Dataset, idx: usize) -> String {
 
 fn find_obs_by_name(ds: &Dataset, needle: &str) -> Option<usize> {
     let needle = needle.to_ascii_lowercase();
-    ds.meta
-        .obs
-        .iter()
-        .enumerate()
-        .find_map(|(i, o)| match o {
-            ObsMeta::Categorical { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
-            ObsMeta::Continuous { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
-            _ => None,
-        })
+    ds.meta.obs.iter().enumerate().find_map(|(i, o)| match o {
+        ObsMeta::Categorical { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
+        ObsMeta::Continuous { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
+        _ => None,
+    })
 }
 
 fn find_space_by_name(ds: &Dataset, needle: &str) -> Option<usize> {
     let needle = needle.to_ascii_lowercase();
-    ds.meta
-        .spaces
-        .iter()
-        .enumerate()
-        .find_map(|(i, s)| if s.name.to_ascii_lowercase().contains(&needle) { Some(i) } else { None })
+    ds.meta.spaces.iter().enumerate().find_map(|(i, s)| {
+        if s.name.to_ascii_lowercase().contains(&needle) {
+            Some(i)
+        } else {
+            None
+        }
+    })
 }
 
 fn chrono_like_timestamp() -> String {
     // Avoid adding chrono dependency; generate a simple timestamp-like string.
     use std::time::{SystemTime, UNIX_EPOCH};
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis();
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
     format!("{ms}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GridCacheKey, StvizApp};
+
+    #[test]
+    fn advanced_filter_signature_tracks_max_draw() {
+        let enabled = [true, false, true, true];
+        let a = StvizApp::advanced_filter_signature(7, 3, 1000, &enabled);
+        let b = StvizApp::advanced_filter_signature(7, 3, 250, &enabled);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn downsample_indices_respects_limit_and_order() {
+        let idx: Vec<u32> = (0..10).collect();
+        let out = StvizApp::downsample_indices(3, &idx);
+        assert_eq!(out, vec![0, 4, 8]);
+    }
+
+    #[test]
+    fn grid_cache_key_includes_filter_signature() {
+        let base = GridCacheKey {
+            dataset_id: 1,
+            space_idx: 2,
+            obs_idx: 3,
+            use_filter: true,
+            filter_sig: 111,
+            version: 4,
+        };
+        let different_filter = GridCacheKey {
+            filter_sig: 222,
+            ..base.clone()
+        };
+        assert_ne!(base, different_filter);
+    }
 }

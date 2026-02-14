@@ -14,6 +14,9 @@ import numpy as np
 import pandas as pd
 import scipy.sparse as sp
 
+STVIZ_MAGIC = b"STVIZ\x00\x00\x00"
+STVIZ_VERSION = 1
+
 
 def _align_to(n: int, a: int) -> int:
     r = n % a
@@ -122,18 +125,30 @@ def export_stviz(input_path: Path, output_path: Path, include_expr: bool) -> Non
         if is_cat or has_palette:
             cat = s.astype("category")
             codes = cat.cat.codes.to_numpy(dtype=np.int32, copy=False)
+            categories = [str(x) for x in list(cat.cat.categories)]
+
+            # pandas uses -1 for missing category values; map those to a real category index.
+            missing_mask = codes < 0
+            if np.any(missing_mask):
+                codes = codes.copy()
+                missing_label = "<missing>"
+                while missing_label in categories:
+                    missing_label += "_"
+                codes[missing_mask] = len(categories)
+                categories.append(missing_label)
+
             codes_u32 = codes.astype(np.uint32, copy=False)
 
             raw = codes_u32.tobytes(order="C")
             off = add_bytes(raw, 4)
 
-            categories = [str(x) for x in list(cat.cat.categories)]
-
             # Optional scanpy palette in .uns: "<col>_colors"
             palette_rgba8 = None
             if has_palette:
                 cols = list(adata.uns[uns_key])
-                palette_rgba8 = [_hex_to_rgba8_u32(str(x)) for x in cols]
+                if len(cols) < len(categories):
+                    cols.extend(["#808080"] * (len(categories) - len(cols)))
+                palette_rgba8 = [_hex_to_rgba8_u32(str(x)) for x in cols[: len(categories)]]
 
             obs_meta.append(
                 {
@@ -200,7 +215,7 @@ def export_stviz(input_path: Path, output_path: Path, include_expr: bool) -> Non
         }
 
     meta = {
-        "version": 1,
+        "version": STVIZ_VERSION,
         "n_points": n,
         "spaces": space_meta,
         "obs": obs_meta,
@@ -208,8 +223,10 @@ def export_stviz(input_path: Path, output_path: Path, include_expr: bool) -> Non
     }
 
     meta_bytes = json.dumps(meta, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-    # header: u64 json_len
+    # header: magic + version + u64 json_len
     out = bytearray()
+    out += STVIZ_MAGIC
+    out += struct.pack("<I", STVIZ_VERSION)
     out += struct.pack("<Q", len(meta_bytes))
     out += meta_bytes
     # pad to 16-byte boundary

@@ -1,6 +1,6 @@
 # stviz-animate Technical Documentation
 
-Last updated: 2026-01-17
+Last updated: 2026-02-14
 
 ## Table of contents
 - Overview
@@ -44,7 +44,10 @@ Key runtime goals:
 - `assets/`: shaders, icons, and static resources.
 - `scripts/`: packaging scripts for Windows, macOS, and Ubuntu.
 - `docs/`: technical documentation (this file).
-- `output/`: runtime output (screenshots, exports, logs).
+- Runtime output is stored in an OS user-data directory:
+  - Windows: `%APPDATA%/stviz-animate/`
+  - macOS: `~/Library/Application Support/stviz-animate/`
+  - Linux: `${XDG_DATA_HOME:-~/.local/share}/stviz-animate/`
 
 ## Build and runtime
 Build and run (debug):
@@ -59,14 +62,17 @@ cargo run --release
 Dependencies:
 - Rust toolchain.
 - GPU drivers for accelerated rendering.
-- Python 3.8+ for conversion and OpenCV fallback export (auto-venv created).
+- Python 3.8+ for conversion and optional OpenCV fallback export.
+- Converter dependencies are specified in `python/requirements.txt` with versions chosen for broad wheel availability.
 
 ## Data format (.stviz)
 `.stviz` is a custom binary format designed for fast memory mapping and low overhead parsing.
 
 File layout:
-- Bytes 0..7: little-endian `u64` JSON metadata length.
-- Bytes 8..(8+json_len-1): JSON metadata (`StvizMeta`).
+- Bytes 0..7: magic bytes `STVIZ\0\0\0`.
+- Bytes 8..11: little-endian `u32` format version.
+- Bytes 12..19: little-endian `u64` JSON metadata length.
+- Bytes 20..(20+json_len-1): JSON metadata (`StvizMeta`).
 - Padding to 16-byte alignment.
 - Binary data blocks (spaces, obs, expression arrays) referenced by offsets in metadata.
 
@@ -91,7 +97,7 @@ Expression metadata (`ExprMeta`):
 - Compressed Sparse Column (CSC) matrices.
 - `indptr`, `indices`, `data` arrays and `var_names` for genes.
 
-`data.rs` maps the file into memory, validates alignment, and provides zero-copy slices.
+`data.rs` maps the file into memory, validates block bounds/lengths/consistency, and provides zero-copy slices. Unsupported format versions are rejected.
 
 ## Data conversion pipeline
 ### `.h5ad` to `.stviz` (`python/export_stviz.py`)
@@ -109,7 +115,7 @@ Expression metadata (`ExprMeta`):
 
 ### Video export fallback (`python/export_video_cv2.py`)
 - OpenCV-based MP4 encoding when ffmpeg is not available.
-- Executed inside a managed venv to reduce system dependency friction.
+- On first fallback usage, OpenCV is installed into the managed converter venv (internet required).
 
 ## Rendering architecture
 Rendering is GPU-first using WGPU and a point-sprite shader.
@@ -209,14 +215,15 @@ Labels:
 ### Screenshots
 - Always rendered at 4K (3840x2160).
 - Uses offscreen GPU rendering with MSAA.
-- Output path: `output/stviz-animate_screenshot_*.png`.
+- Output path: `<user-data>/output/screenshots/stviz-animate_screenshot_*.png`.
 - PNG encoding is lossless.
 
 ### Loop video export
 Pipeline:
-1. Render PNG frames into `output/loop_<timestamp>/`.
-2. Encode into MP4 using ffmpeg (preferred) or OpenCV (fallback).
-3. Optionally delete frames after encoding.
+1. Render PNG frames into `<user-data>/output/exports/loop_<timestamp>/`.
+2. Encode into a temporary MP4 in the export directory.
+3. Move/rename to final output in `<user-data>/output/` only on success.
+4. Optionally delete frames after encoding.
 
 Quality options:
 - Render resolution: Current viewport, Full HD, 4K.
@@ -226,15 +233,15 @@ Quality options:
   - Ultra: CRF 14, preset slow, yuv420p.
 
 Export controls:
-- Cancel export stops rendering and deletes partial output.
-- Export log is stored in `output/export_log_*.txt` and visible in the UI.
+- Cancel export stops rendering and deletes only managed temporary output.
+- Export log is stored in `<user-data>/logs/export_log_*.txt` and visible in the UI.
 
 ## Output and logs
-- Conversion outputs: `output/*.stviz`.
-- Mock datasets: `output/mock_spatial_*.h5ad` (temporary).
-- Videos: `output/*.mp4`.
-- Screenshots: `output/stviz-animate_screenshot_*.png`.
-- Logs: `output/convert_log_*.txt`, `output/export_log_*.txt`.
+- Conversion outputs: `<user-data>/output/*.stviz`.
+- Mock datasets: `<user-data>/output/mock_spatial_*.h5ad` (temporary).
+- Videos: `<user-data>/output/*.mp4`.
+- Screenshots: `<user-data>/output/screenshots/stviz-animate_screenshot_*.png`.
+- Logs: `<user-data>/logs/convert_log_*.txt`, `<user-data>/logs/export_log_*.txt`.
 
 ## Packaging and distribution
 Scripts:
@@ -250,10 +257,11 @@ Bundle notes:
 ## Configuration and environment
 Python selection:
 - Prefers active venv/conda, then system `python` / `python3`.
-- Creates `.stviz_venv` for converter dependencies.
+- Managed converter env location: `<user-data>/.stviz_venv` (auto-created and dependency-installed on first conversion/export-fallback run).
 
 Environment variables:
 - `STVIZ_FFMPEG`: override ffmpeg path.
+- `STVIZ_DATA_DIR`: override the user-data directory root.
 
 GPU selection:
 - Uses WGPU default adapter.
@@ -272,3 +280,12 @@ Common areas to modify:
 - Add new color modes: `ColorMode` enum and `colors_for_key` in `src/app.rs`.
 - Modify shader rendering: `assets/pointcloud.wgsl`.
 - Adjust file format: `python/export_stviz.py` and `src/data.rs`.
+
+## 1.0 smoke-test checklist
+Run before tagging:
+1. Load a small `.stviz` and verify interaction/color/filtering.
+2. Load a large `.stviz` and verify performance and stability.
+3. Switch spaces and color modes (categorical/continuous/gene).
+4. Start loop export, then cancel; verify only managed temp outputs are removed.
+5. Complete loop export with ffmpeg and (optionally) OpenCV fallback.
+6. Run one `.h5ad` conversion with dependencies preinstalled.

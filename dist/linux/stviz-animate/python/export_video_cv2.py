@@ -3,9 +3,15 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import sys
 
-import cv2
+_NATURAL_PARTS = re.compile(r"(\d+)")
+
+
+def _natural_sort_key(path: Path):
+    parts = _NATURAL_PARTS.split(path.name)
+    return tuple(int(p) if p.isdigit() else p.lower() for p in parts)
 
 
 def parse_args() -> argparse.Namespace:
@@ -24,6 +30,12 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    try:
+        import cv2
+    except ImportError:
+        print("OpenCV (cv2) is required for video export fallback.", file=sys.stderr)
+        return 6
+
     args = parse_args()
     input_dir = Path(args.input_dir)
     output = Path(args.output)
@@ -31,7 +43,7 @@ def main() -> int:
         print(f"Input directory not found: {input_dir}", file=sys.stderr)
         return 2
 
-    frames = sorted(input_dir.glob(args.pattern))
+    frames = sorted(input_dir.glob(args.pattern), key=_natural_sort_key)
     if not frames:
         print(f"No frames found in {input_dir} with pattern {args.pattern}", file=sys.stderr)
         return 3

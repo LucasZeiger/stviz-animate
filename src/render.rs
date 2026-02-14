@@ -88,7 +88,9 @@ impl PointCloudGpu {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
-                        min_binding_size: Some(wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64).unwrap()),
+                        min_binding_size: Some(
+                            wgpu::BufferSize::new(std::mem::size_of::<Uniforms>() as u64).unwrap(),
+                        ),
                     },
                     count: None,
                 },
@@ -256,12 +258,20 @@ impl PointCloudGpu {
         });
 
         let corners_data = [
-            CornerVert { corner: [-1.0, -1.0] },
-            CornerVert { corner: [1.0, -1.0] },
+            CornerVert {
+                corner: [-1.0, -1.0],
+            },
+            CornerVert {
+                corner: [1.0, -1.0],
+            },
             CornerVert { corner: [1.0, 1.0] },
-            CornerVert { corner: [-1.0, -1.0] },
+            CornerVert {
+                corner: [-1.0, -1.0],
+            },
             CornerVert { corner: [1.0, 1.0] },
-            CornerVert { corner: [-1.0, 1.0] },
+            CornerVert {
+                corner: [-1.0, 1.0],
+            },
         ];
         let corners = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("pc_corners"),
@@ -273,12 +283,30 @@ impl PointCloudGpu {
             label: Some("pc_bg"),
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: pos_from.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: pos_to.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: colors_from.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: colors_to.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: draw_indices.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: pos_from.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: pos_to.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: colors_from.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: colors_to.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: draw_indices.as_entire_binding(),
+                },
             ],
         });
 
@@ -307,7 +335,12 @@ impl PointCloudGpu {
         }
     }
 
-    fn ensure_storage_buffer(device: &wgpu::Device, buf: &mut wgpu::Buffer, label: &str, need_bytes: u64) {
+    fn ensure_storage_buffer(
+        device: &wgpu::Device,
+        buf: &mut wgpu::Buffer,
+        label: &str,
+        need_bytes: u64,
+    ) {
         if buf.size() >= need_bytes {
             return;
         }
@@ -356,8 +389,15 @@ impl PointCloudGpu {
         }
 
         let n_points = dataset.meta.n_points;
+        if let Some(bad) = draw_indices.iter().copied().find(|&idx| idx >= n_points) {
+            return Err(anyhow!(
+                "draw index out of range: {} (n_points={})",
+                bad,
+                n_points
+            ));
+        }
         self.n_points = n_points;
-        self.n_draw = draw_indices.len().min(n_points as usize) as u32;
+        self.n_draw = draw_indices.len() as u32;
 
         // Grow buffers
         let pos_bytes_need = (n_points as u64) * 2 * 4;
@@ -366,9 +406,19 @@ impl PointCloudGpu {
 
         Self::ensure_storage_buffer(device, &mut self.pos_from, "pc_pos_from", pos_bytes_need);
         Self::ensure_storage_buffer(device, &mut self.pos_to, "pc_pos_to", pos_bytes_need);
-        Self::ensure_storage_buffer(device, &mut self.colors_from, "pc_colors_from", col_bytes_need);
+        Self::ensure_storage_buffer(
+            device,
+            &mut self.colors_from,
+            "pc_colors_from",
+            col_bytes_need,
+        );
         Self::ensure_storage_buffer(device, &mut self.colors_to, "pc_colors_to", col_bytes_need);
-        Self::ensure_storage_buffer(device, &mut self.draw_indices, "pc_draw_indices", idx_bytes_need);
+        Self::ensure_storage_buffer(
+            device,
+            &mut self.draw_indices,
+            "pc_draw_indices",
+            idx_bytes_need,
+        );
 
         // Rebuild bind group if buffers were replaced
         let bgl = self.pipeline_alpha.get_bind_group_layout(0);
@@ -376,12 +426,30 @@ impl PointCloudGpu {
             label: Some("pc_bg"),
             layout: &bgl,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: self.uniform_buf.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: self.pos_from.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 2, resource: self.pos_to.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 3, resource: self.colors_from.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 4, resource: self.colors_to.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 5, resource: self.draw_indices.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buf.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.pos_from.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.pos_to.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.colors_from.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.colors_to.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.draw_indices.as_entire_binding(),
+                },
             ],
         });
 
@@ -499,6 +567,7 @@ pub struct RenderParams {
 
 pub struct SharedRender {
     pub params: Mutex<RenderParams>,
+    pub last_prepare_error: Mutex<Option<String>>,
 }
 
 impl SharedRender {
@@ -523,6 +592,7 @@ impl SharedRender {
                 from_override_id: 0,
                 to_override_id: 0,
             }),
+            last_prepare_error: Mutex::new(None),
         }
     }
 }

@@ -9,6 +9,9 @@ $dist = Join-Path $root $OutDir
 $zip = Join-Path $root "dist/stviz-animate-windows.zip"
 
 cargo build --release
+if ($LASTEXITCODE -ne 0) {
+    throw "cargo build --release failed with exit code $LASTEXITCODE"
+}
 
 if (Test-Path $dist) {
     Remove-Item $dist -Recurse -Force

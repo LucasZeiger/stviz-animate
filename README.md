@@ -9,7 +9,7 @@ Animate transitions between coordinate spaces (spatial, UMAP, tSNE, PCA, ...), a
 - Advanced timeline canvas for fine-grained sequencing and filtering (beta).
 - Loop video export with quality presets (Current viewport, 1080p, 4K).
 - Mock dataset generator for quick demos. The mock data generation needs some more work to look more tissue - like and potentially have other presets, but works for now.
-- Built-in .h5ad -> .stviz converter with automatic Python venv setup.
+- Built-in .h5ad -> .stviz converter (uses your Python environment or an optional managed user-data venv).
 
 ## Quick start
 
@@ -32,26 +32,6 @@ Linux (Ubuntu):
    ```bash
    ./stviz-animate/stviz-animate
    ```
-
-Make sure to look at the docs for more information on how to use stviz-animate.
-
-## Data conversion (.h5ad -> .stviz)
-- Drag a `.h5ad` file into the conversion box, or click it to pick a file.
-- The converter creates a private Python venv in `.stviz_venv` as needed.
-- Important: This requires Python 3.8+ to be present on your system and as a system Path.
-
-Manual conversion:
-
-```bash
-python -m pip install -U anndata h5py numpy pandas scipy
-python python/export_stviz.py --input your_data.h5ad --output your_data.stviz
-```
-
-## Export
-- Screenshot: saves a PNG to `output/` at 4K (3840x2160).
-- Loop export: writes an MP4 to `output/`, with configurable fps, duration, and quality (Current viewport, 1080p, 4K).
-- Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
-- ffmpeg is preferred. If missing, OpenCV is used as a fallback (installed into `.stviz_venv` on first use).
 
 ### Windows
 
@@ -83,6 +63,29 @@ sudo apt-get install -y libgtk-3-dev
 cargo run --release
 ```
 
+## Data conversion (.h5ad -> .stviz)
+- Drag a `.h5ad` file into the app or click the conversion box to pick a file.
+- Writable runtime data lives in your user-data directory:
+  - Windows: `%APPDATA%/stviz-animate/`
+  - macOS: `~/Library/Application Support/stviz-animate/`
+  - Linux: `${XDG_DATA_HOME:-~/.local/share}/stviz-animate/`
+- On first conversion/export-fallback run, the app silently creates a managed venv at `<user-data>/.stviz_venv` and installs dependencies from `python/requirements.txt` (internet required).
+
+Manual conversion:
+
+```bash
+python -m pip install -r python/requirements.txt
+python python/export_stviz.py --input your_data.h5ad --output your_data.stviz
+```
+
+Requires Python 3.8+.
+
+## Export
+- Screenshot: saves a PNG to `<user-data>/output/screenshots/` at 4K (3840x2160).
+- Loop export: writes frames under `<user-data>/output/exports/` and MP4 output under `<user-data>/output/`.
+- Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
+- ffmpeg is preferred. If missing, OpenCV fallback is auto-installed in the managed converter venv on first use.
+
 ## Packaging
 Scripts to produce portable bundles:
 
@@ -102,17 +105,21 @@ Ubuntu:
 ./scripts/package_ubuntu.sh
 ```
 
+Packaging includes Python converter scripts. Converter dependencies are installed on first use (internet required).
+
 ## Docs
-See `docs/stviz-animate_documentation.md` for a full user guide and workflow details.
+See `docs/technical_documentation.md` for architecture and workflow details.
 
 ## File format (.stviz)
 Single file format:
 
 ```
+[8-byte magic "STVIZ\0\0\0"]
+[u32 version]
 [u64 json_len]
 [json bytes]
 [padding to 16-byte boundary]
 [raw binary blocks] (offsets in JSON metadata)
 ```
 
-The exporter aligns blocks to 4 bytes; the viewer memory-maps the file for fast access.
+The exporter aligns blocks to 4 bytes; the viewer memory-maps the file and rejects unsupported versions.

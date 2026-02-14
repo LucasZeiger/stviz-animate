@@ -29,9 +29,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     if cfg!(target_os = "windows") {
-        native_options.vsync = false;
         let mut wgpu_config = egui_wgpu::WgpuConfiguration {
-            present_mode: egui_wgpu::wgpu::PresentMode::AutoNoVsync,
             desired_maximum_frame_latency: Some(1),
             ..Default::default()
         };

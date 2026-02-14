@@ -1,0 +1,37 @@
+name: Release Checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  release-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Release check
+        run: cargo check --release
+
+      - name: Release tests
+        run: cargo test --release
+
+      - name: Python syntax checks
+        run: |
+          python3 -m py_compile \
+            python/export_stviz.py \
+            python/mock_spatial_dataset.py \
+            python/export_video_cv2.py
