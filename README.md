@@ -9,7 +9,7 @@ Animate transitions between coordinate spaces (spatial, UMAP, tSNE, PCA, ...), a
 - Advanced timeline canvas for fine-grained sequencing and filtering (beta).
 - Loop video export with quality presets (Current viewport, 1080p, 4K).
 - Mock dataset generator for quick demos. The mock data generation needs some more work to look more tissue - like and potentially have other presets, but works for now.
-- Built-in .h5ad -> .stviz converter (uses your Python environment or an optional managed user-data venv).
+- Built-in .h5ad -> .stviz converter (runs in an app-managed user-data venv).
 
 ## Quick start
 
@@ -69,16 +69,19 @@ cargo run --release
   - Windows: `%APPDATA%/stviz-animate/`
   - macOS: `~/Library/Application Support/stviz-animate/`
   - Linux: `${XDG_DATA_HOME:-~/.local/share}/stviz-animate/`
-- On first conversion/export-fallback run, the app silently creates a managed venv at `<user-data>/.stviz_venv` and installs dependencies from `python/requirements.txt` (internet required).
+- The app creates and uses a managed venv at `<user-data>/.stviz_venv` for conversion and OpenCV fallback.
+- A system Python install is still required so the app can create that managed venv.
+- On first conversion/export-fallback run, dependencies are silently installed from `python/requirements.txt` (internet required).
 
 Manual conversion:
 
 ```bash
+python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r python/requirements.txt
 python python/export_stviz.py --input your_data.h5ad --output your_data.stviz
 ```
 
-Requires Python 3.8+.
+Requires Python 3.8+ (Python 3.10+ recommended).
 
 ## Export
 - Screenshot: saves a PNG to `<user-data>/output/screenshots/` at 4K (3840x2160).
