@@ -18,6 +18,9 @@ if [[ ! -d "$app" ]]; then
   echo "Missing bundle: $app" >&2
   exit 1
 fi
+if [[ -f "$root/THIRD_PARTY_NOTICES.md" ]]; then
+  cp "$root/THIRD_PARTY_NOTICES.md" "$app/Contents/Resources/THIRD_PARTY_NOTICES.md"
+fi
 
 rm -rf "$dist"
 mkdir -p "$dist"

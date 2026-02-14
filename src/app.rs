@@ -125,6 +125,8 @@ pub struct StvizApp {
     export_cancelled: bool,
     ffmpeg_available: bool,
     ffmpeg_path: Option<PathBuf>,
+    ffmpeg_auto_install: bool,
+    ffmpeg_auto_install_attempted: bool,
     export_log_path: Option<PathBuf>,
     export_log_text: String,
     export_log_open: bool,
@@ -487,6 +489,8 @@ impl StvizApp {
             export_cancelled: false,
             ffmpeg_path: ffmpeg_path.clone(),
             ffmpeg_available: ffmpeg_path.is_some(),
+            ffmpeg_auto_install: true,
+            ffmpeg_auto_install_attempted: false,
             export_log_path: None,
             export_log_text: String::new(),
             export_log_open: false,
@@ -1771,6 +1775,140 @@ Then add that path to your system environment variables (PATH).";
         self.ffmpeg_path = path;
     }
 
+    fn run_ffmpeg_install_attempt(&mut self, label: &str, program: &str, args: &[&str]) -> bool {
+        self.append_export_log(&format!(
+            "Trying ffmpeg installer ({label}): {} {}",
+            program,
+            args.join(" ")
+        ));
+        let mut cmd = Command::new(program);
+        Self::apply_subprocess_flags(&mut cmd);
+        let output = cmd.args(args).output();
+        match output {
+            Ok(out) if out.status.success() => {
+                self.append_export_log(&format!("Installer command succeeded: {}", out.status));
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stdout.trim().is_empty() {
+                    self.append_export_log(stdout.trim());
+                }
+                if !stderr.trim().is_empty() {
+                    self.append_export_log(stderr.trim());
+                }
+                self.refresh_ffmpeg_path();
+                self.ffmpeg_path.is_some()
+            }
+            Ok(out) => {
+                self.append_export_log(&format!(
+                    "Installer command failed ({label}): {}",
+                    out.status
+                ));
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !stdout.trim().is_empty() {
+                    self.append_export_log(stdout.trim());
+                }
+                if !stderr.trim().is_empty() {
+                    self.append_export_log(stderr.trim());
+                }
+                false
+            }
+            Err(e) => {
+                self.append_export_log(&format!("Installer command unavailable ({label}): {e}"));
+                false
+            }
+        }
+    }
+
+    fn try_auto_install_ffmpeg(&mut self) -> bool {
+        if self.ffmpeg_path.is_some() {
+            return true;
+        }
+        if self.ffmpeg_auto_install_attempted {
+            return false;
+        }
+        self.ffmpeg_auto_install_attempted = true;
+        self.append_export_log(
+            "ffmpeg not found; attempting automatic install (internet required).",
+        );
+
+        #[cfg(target_os = "windows")]
+        {
+            if self.run_ffmpeg_install_attempt(
+                "winget",
+                "winget",
+                &[
+                    "install",
+                    "-e",
+                    "--id",
+                    "Gyan.FFmpeg",
+                    "--silent",
+                    "--scope",
+                    "user",
+                    "--accept-source-agreements",
+                    "--accept-package-agreements",
+                    "--disable-interactivity",
+                ],
+            ) {
+                self.append_export_log("ffmpeg detected after winget install.");
+                return true;
+            }
+            if self.run_ffmpeg_install_attempt("choco", "choco", &["install", "ffmpeg", "-y"]) {
+                self.append_export_log("ffmpeg detected after choco install.");
+                return true;
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if self.run_ffmpeg_install_attempt("homebrew", "brew", &["install", "ffmpeg"]) {
+                self.append_export_log("ffmpeg detected after brew install.");
+                return true;
+            }
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if self.run_ffmpeg_install_attempt(
+                "apt (sudo)",
+                "sudo",
+                &["-n", "apt-get", "install", "-y", "ffmpeg"],
+            ) {
+                self.append_export_log("ffmpeg detected after apt install.");
+                return true;
+            }
+            if self.run_ffmpeg_install_attempt("apt", "apt-get", &["install", "-y", "ffmpeg"]) {
+                self.append_export_log("ffmpeg detected after apt install.");
+                return true;
+            }
+            if self.run_ffmpeg_install_attempt("dnf", "dnf", &["install", "-y", "ffmpeg"]) {
+                self.append_export_log("ffmpeg detected after dnf install.");
+                return true;
+            }
+            if self.run_ffmpeg_install_attempt("pacman", "pacman", &["-S", "--noconfirm", "ffmpeg"])
+            {
+                self.append_export_log("ffmpeg detected after pacman install.");
+                return true;
+            }
+            if self.run_ffmpeg_install_attempt(
+                "zypper",
+                "zypper",
+                &["--non-interactive", "install", "ffmpeg"],
+            ) {
+                self.append_export_log("ffmpeg detected after zypper install.");
+                return true;
+            }
+        }
+
+        self.refresh_ffmpeg_path();
+        if self.ffmpeg_path.is_none() {
+            self.append_export_log(
+                "Automatic ffmpeg installation did not complete. Continuing with OpenCV fallback.",
+            );
+        }
+        self.ffmpeg_path.is_some()
+    }
+
     fn run_python_cv2_export(&mut self, frames_dir: &Path, out_path: &Path) -> Result<(), String> {
         let script = self.project_dir.join("python").join("export_video_cv2.py");
         if !script.exists() {
@@ -2572,6 +2710,9 @@ Then add that path to your system environment variables (PATH).";
         };
         self.append_export_log(&format!("Keep PNG frames: {keep_label}"));
         if self.export_run_ffmpeg {
+            if self.ffmpeg_path.is_none() && self.ffmpeg_auto_install {
+                let _ = self.try_auto_install_ffmpeg();
+            }
             let ffmpeg_label = self
                 .ffmpeg_path
                 .as_ref()
@@ -4321,11 +4462,20 @@ Then add that path to your system environment variables (PATH).";
             {
                 self.refresh_ffmpeg_path();
             }
+            ui.checkbox(
+                &mut self.ffmpeg_auto_install,
+                "Auto-install ffmpeg if missing (best effort)",
+            );
             if self.export_run_ffmpeg && !self.ffmpeg_available {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "ffmpeg not found (will try OpenCV fallback).",
                 );
+                if self.ffmpeg_auto_install && ui.button("Retry ffmpeg install now").clicked() {
+                    self.ffmpeg_auto_install_attempted = false;
+                    let _ = self.try_auto_install_ffmpeg();
+                    self.refresh_ffmpeg_path();
+                }
             }
             let keep_forced = !self.export_run_ffmpeg;
             let mut keep_pref = self.export_keep_frames;

@@ -86,7 +86,8 @@ Requires Python 3.8+ (Python 3.10+ recommended).
 - Screenshot: saves a PNG to `<user-data>/output/screenshots/` at 4K (3840x2160).
 - Loop export: writes frames under `<user-data>/output/exports/` and MP4 output under `<user-data>/output/`.
 - Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
-- ffmpeg is preferred. If missing, OpenCV fallback is auto-installed in the managed converter venv on first use.
+- `ffmpeg` is preferred if available on the user system. If missing, OpenCV fallback is auto-installed in the managed converter venv on first use.
+- If `ffmpeg` is missing, the app can also attempt a best-effort first-run install via system package manager (internet required; admin rights may be required depending on OS policy).
 
 ## Packaging
 Scripts to produce portable bundles:
@@ -107,7 +108,16 @@ Ubuntu:
 ./scripts/package_ubuntu.sh
 ```
 
-Packaging includes Python converter scripts. Converter dependencies are installed on first use (internet required).
+Packaging includes Python converter scripts and `THIRD_PARTY_NOTICES.md`.
+Converter dependencies are installed on first use (internet required).
+`ffmpeg` is not bundled by default in packaging scripts.
+- Windows: pass `-IncludeFfmpeg` to `scripts/package_windows.ps1` to include local ffmpeg binaries.
+- Ubuntu: set `INCLUDE_FFMPEG=1` when running `scripts/package_ubuntu.sh` to include local ffmpeg binaries.
+
+## Third-party compliance notes
+- Review `THIRD_PARTY_NOTICES.md` before shipping builds.
+- If you bundle `ffmpeg`, verify obligations for that exact build (LGPL/GPL and codec patent implications can differ by build/options/jurisdiction).
+- If you do not bundle `ffmpeg`, users can install it separately and the app will use it when present.
 
 ## Docs
 See `docs/technical_documentation.md` for architecture and workflow details.

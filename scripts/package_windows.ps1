@@ -1,5 +1,6 @@
 param(
-    [string]$OutDir = "dist/windows"
+    [string]$OutDir = "dist/windows",
+    [switch]$IncludeFfmpeg
 )
 
 $ErrorActionPreference = "Stop"
@@ -20,15 +21,24 @@ New-Item -ItemType Directory -Force $dist | Out-Null
 
 Copy-Item (Join-Path $root "target/release/stviz-animate.exe") $dist
 Copy-Item (Join-Path $root "python") -Destination (Join-Path $dist "python") -Recurse
-
-$ffmpegDir = Join-Path $root "ffmpeg"
-if (Test-Path $ffmpegDir) {
-    Copy-Item $ffmpegDir -Destination (Join-Path $dist "ffmpeg") -Recurse
+if (Test-Path (Join-Path $root "THIRD_PARTY_NOTICES.md")) {
+    Copy-Item (Join-Path $root "THIRD_PARTY_NOTICES.md") $dist
 }
-$ffmpegBin = Join-Path $root "bin/ffmpeg.exe"
-if (Test-Path $ffmpegBin) {
-    New-Item -ItemType Directory -Force (Join-Path $dist "bin") | Out-Null
-    Copy-Item $ffmpegBin (Join-Path $dist "bin/ffmpeg.exe")
+
+if ($IncludeFfmpeg) {
+    $ffmpegDir = Join-Path $root "ffmpeg"
+    if (Test-Path $ffmpegDir) {
+        Copy-Item $ffmpegDir -Destination (Join-Path $dist "ffmpeg") -Recurse
+    }
+    $ffmpegBin = Join-Path $root "bin/ffmpeg.exe"
+    if (Test-Path $ffmpegBin) {
+        New-Item -ItemType Directory -Force (Join-Path $dist "bin") | Out-Null
+        Copy-Item $ffmpegBin (Join-Path $dist "bin/ffmpeg.exe")
+    }
+    Write-Host "Included local ffmpeg binaries. Ensure third-party license and patent obligations are satisfied."
+}
+else {
+    Write-Host "Skipping ffmpeg bundling by default. Use -IncludeFfmpeg only if you handle ffmpeg/x264 compliance."
 }
 
 if (Test-Path $zip) {
