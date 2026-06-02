@@ -114,11 +114,6 @@ Converter dependencies are installed on first use (internet required).
 - Windows: pass `-IncludeFfmpeg` to `scripts/package_windows.ps1` to include local ffmpeg binaries.
 - Ubuntu: set `INCLUDE_FFMPEG=1` when running `scripts/package_ubuntu.sh` to include local ffmpeg binaries.
 
-## Third-party compliance notes
-- Review `THIRD_PARTY_NOTICES.md` before shipping builds.
-- If you bundle `ffmpeg`, verify obligations for that exact build (LGPL/GPL and codec patent implications can differ by build/options/jurisdiction).
-- If you do not bundle `ffmpeg`, users can install it separately and the app will use it when present.
-
 ## Docs
 See `docs/technical_documentation.md` for architecture and workflow details.
 
