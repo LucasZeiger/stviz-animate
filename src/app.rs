@@ -10,10 +10,12 @@ use egui_wgpu::{wgpu, CallbackTrait};
 use rand::{seq::SliceRandom, Rng};
 #[cfg(windows)]
 use raw_window_handle::HasWindowHandle;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
+    io::Write,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Child, ChildStdin, Command, Stdio},
     sync::Arc,
     thread,
 };
@@ -37,6 +39,24 @@ enum ExportVideoQuality {
     Standard,
     High,
     Ultra,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+enum ExportEncodingSpeed {
+    Fast,
+    Balanced,
+    #[default]
+    SmallestFile,
+}
+
+impl ExportEncodingSpeed {
+    fn preset(self) -> &'static str {
+        match self {
+            Self::Fast => "fast",
+            Self::Balanced => "medium",
+            Self::SmallestFile => "slow",
+        }
+    }
 }
 
 pub struct StvizApp {
@@ -63,7 +83,9 @@ pub struct StvizApp {
     active_filters: HashSet<usize>,
     color_path_enabled: bool,
     color_path: Vec<ColorKey>,
+    filter_path: Vec<Option<KeyframeFilter>>,
     color_cache: HashMap<ColorKey, ColorCacheEntry>,
+    filtered_color_cache: HashMap<u64, Arc<Vec<u32>>>,
     color_id_gen: u64,
     selected_key_idx: Option<usize>,
     timeline_height: f32,
@@ -110,6 +132,7 @@ pub struct StvizApp {
     export_quality: ExportQuality,
     export_resolution: Option<[u32; 2]>,
     export_video_quality: ExportVideoQuality,
+    export_encoding_speed: ExportEncodingSpeed,
     export_dir: PathBuf,
     export_name: String,
     export_output_path: Option<PathBuf>,
@@ -120,6 +143,7 @@ pub struct StvizApp {
     export_run_ffmpeg: bool,
     export_keep_frames: bool,
     export_camera: Option<Camera2D>,
+    direct_video_export: Option<DirectVideoExport>,
     export_pending_frames: u32,
     export_finishing: bool,
     export_cancelled: bool,
@@ -204,6 +228,7 @@ pub struct StvizApp {
 
     // Open path fallback + status
     open_path: String,
+    workspace_status: Option<String>,
     last_error: Option<String>,
 
     // Viewport (for interactions)
@@ -211,7 +236,7 @@ pub struct StvizApp {
     last_viewport_px: [f32; 2],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ColorMode {
     Categorical,
     Continuous,
@@ -226,20 +251,20 @@ enum ColorKey {
     Gene(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum PlaybackMode {
     Once,
     Loop,
     PingPong,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum SampleGridLabelMode {
     Default,
     Custom,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum EaseMode {
     Linear,
     Smoothstep,
@@ -255,7 +280,7 @@ enum KeyColorKind {
     Gene,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum UiTheme {
     Dark,
     Light,
@@ -263,7 +288,7 @@ enum UiTheme {
     Matrix,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum CategoricalPalette {
     Tableau10,
     Tab10,
@@ -332,6 +357,84 @@ struct AdvancedCardFilter {
 }
 
 #[derive(Clone, Debug)]
+struct KeyframeFilter {
+    obs_idx: usize,
+    enabled: Vec<bool>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceFile {
+    version: u32,
+    dataset_path: PathBuf,
+    dataset_points: u32,
+    camera_center: [f32; 2],
+    camera_pixels_per_unit: f32,
+    keyframes: Vec<WorkspaceKeyframe>,
+    key_times: Vec<f32>,
+    color_path_enabled: bool,
+    color_mode: ColorMode,
+    active_obs: Option<String>,
+    gene_selected: Option<String>,
+    categorical_palette: CategoricalPalette,
+    category_overrides: Vec<WorkspaceOverrides>,
+    global_filters: Vec<WorkspaceFilter>,
+    playback_mode: PlaybackMode,
+    ease_mode: EaseMode,
+    speed: f32,
+    t: f32,
+    point_radius_px: f32,
+    max_draw_points: usize,
+    #[serde(default)]
+    export_encoding_speed: ExportEncodingSpeed,
+    background_rgba: [u8; 4],
+    ui_scale: f32,
+    ui_theme: UiTheme,
+    show_axes: bool,
+    show_stats: bool,
+    sample_grid: WorkspaceSampleGrid,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceKeyframe {
+    space: String,
+    color: WorkspaceColor,
+    filter: Option<WorkspaceFilter>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value")]
+enum WorkspaceColor {
+    Current,
+    Categorical(String),
+    Continuous(String),
+    Gene(String),
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceFilter {
+    field: String,
+    enabled_categories: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceOverrides {
+    field: String,
+    colors: HashMap<String, u32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WorkspaceSampleGrid {
+    enabled: bool,
+    obs: Option<String>,
+    space: Option<String>,
+    use_filter: bool,
+    padding: f32,
+    labels_enabled: bool,
+    label_mode: SampleGridLabelMode,
+    custom_labels: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
 struct AdvancedCard {
     id: u64,
     space_idx: usize,
@@ -369,6 +472,12 @@ struct ConvertResult {
     output: PathBuf,
     load_after: bool,
     python_exe: Option<String>,
+}
+
+struct DirectVideoExport {
+    child: Child,
+    stdin: Option<ChildStdin>,
+    stderr_path: PathBuf,
 }
 
 impl StvizApp {
@@ -430,7 +539,9 @@ impl StvizApp {
             active_filters: HashSet::new(),
             color_path_enabled: false,
             color_path: Vec::new(),
+            filter_path: Vec::new(),
             color_cache: HashMap::new(),
+            filtered_color_cache: HashMap::new(),
             color_id_gen: 1,
             selected_key_idx: None,
             timeline_height: 160.0,
@@ -474,6 +585,7 @@ impl StvizApp {
             export_quality: ExportQuality::Current,
             export_resolution: None,
             export_video_quality: ExportVideoQuality::High,
+            export_encoding_speed: ExportEncodingSpeed::SmallestFile,
             export_dir: export_root_dir.clone(),
             export_name: String::from("stviz-animate_loop.mp4"),
             export_output_path: None,
@@ -484,6 +596,7 @@ impl StvizApp {
             export_run_ffmpeg: true,
             export_keep_frames: false,
             export_camera: None,
+            direct_video_export: None,
             export_pending_frames: 0,
             export_finishing: false,
             export_cancelled: false,
@@ -563,6 +676,7 @@ impl StvizApp {
             gene_selected: None,
 
             open_path: String::new(),
+            workspace_status: None,
             last_error: None,
 
             last_viewport_points: egui::Rect::ZERO,
@@ -726,6 +840,404 @@ impl StvizApp {
         self.load_dataset(&path)
     }
 
+    fn workspace_filter(ds: &Dataset, obs_idx: usize, enabled: &[bool]) -> Option<WorkspaceFilter> {
+        let (name, _labels, categories, _pal) = ds.obs_categorical(obs_idx).ok()?;
+        Some(WorkspaceFilter {
+            field: name.to_string(),
+            enabled_categories: categories
+                .iter()
+                .zip(enabled)
+                .filter_map(|(name, enabled)| enabled.then_some(name.clone()))
+                .collect(),
+        })
+    }
+
+    fn resolve_workspace_filter(
+        ds: &Dataset,
+        saved: &WorkspaceFilter,
+    ) -> anyhow::Result<KeyframeFilter> {
+        let obs_idx = ds
+            .meta
+            .obs
+            .iter()
+            .position(
+                |obs| matches!(obs, ObsMeta::Categorical { name, .. } if name == &saved.field),
+            )
+            .ok_or_else(|| anyhow::anyhow!("categorical field not found: {}", saved.field))?;
+        let (_name, _labels, categories, _pal) = ds.obs_categorical(obs_idx)?;
+        if categories.len() > MAX_FILTER_CATEGORIES {
+            anyhow::bail!(
+                "categorical field '{}' has {} categories; filter limit is {}",
+                saved.field,
+                categories.len(),
+                MAX_FILTER_CATEGORIES
+            );
+        }
+        let enabled_names: HashSet<&str> = saved
+            .enabled_categories
+            .iter()
+            .map(String::as_str)
+            .collect();
+        Ok(KeyframeFilter {
+            obs_idx,
+            enabled: categories
+                .iter()
+                .map(|name| enabled_names.contains(name.as_str()))
+                .collect(),
+        })
+    }
+
+    fn build_workspace(&self) -> anyhow::Result<WorkspaceFile> {
+        let ds = self
+            .dataset
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no dataset loaded"))?;
+        let dataset_path = self
+            .dataset_path
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("dataset path unavailable"))?;
+
+        let mut keyframes = Vec::with_capacity(self.space_path.len());
+        for (i, &space_idx) in self.space_path.iter().enumerate() {
+            let space = ds
+                .meta
+                .spaces
+                .get(space_idx)
+                .ok_or_else(|| anyhow::anyhow!("invalid keyframe space"))?
+                .name
+                .clone();
+            let color = match self.color_path.get(i).unwrap_or(&ColorKey::Current) {
+                ColorKey::Current => WorkspaceColor::Current,
+                ColorKey::Categorical(idx) => match ds.meta.obs.get(*idx) {
+                    Some(ObsMeta::Categorical { name, .. }) => {
+                        WorkspaceColor::Categorical(name.clone())
+                    }
+                    _ => return Err(anyhow::anyhow!("invalid categorical color field")),
+                },
+                ColorKey::Continuous(idx) => match ds.meta.obs.get(*idx) {
+                    Some(ObsMeta::Continuous { name, .. }) => {
+                        WorkspaceColor::Continuous(name.clone())
+                    }
+                    _ => return Err(anyhow::anyhow!("invalid continuous color field")),
+                },
+                ColorKey::Gene(name) => WorkspaceColor::Gene(name.clone()),
+            };
+            let filter = self
+                .filter_path
+                .get(i)
+                .and_then(Option::as_ref)
+                .and_then(|f| Self::workspace_filter(ds, f.obs_idx, &f.enabled));
+            keyframes.push(WorkspaceKeyframe {
+                space,
+                color,
+                filter,
+            });
+        }
+
+        let mut category_overrides = Vec::new();
+        for (&obs_idx, overrides) in &self.category_overrides {
+            if let Ok((name, _labels, categories, _pal)) = ds.obs_categorical(obs_idx) {
+                let colors = categories
+                    .iter()
+                    .zip(overrides)
+                    .filter_map(|(category, color)| color.map(|c| (category.clone(), c)))
+                    .collect();
+                category_overrides.push(WorkspaceOverrides {
+                    field: name.to_string(),
+                    colors,
+                });
+            }
+        }
+
+        let global_filters = self
+            .active_filters
+            .iter()
+            .filter_map(|idx| {
+                self.category_state
+                    .get(idx)
+                    .and_then(|enabled| Self::workspace_filter(ds, *idx, enabled))
+            })
+            .collect();
+        let active_obs = ds.meta.obs.get(self.active_obs_idx).map(|obs| match obs {
+            ObsMeta::Categorical { name, .. } | ObsMeta::Continuous { name, .. } => name.clone(),
+        });
+        let bg = self.background_color;
+
+        Ok(WorkspaceFile {
+            version: 1,
+            dataset_path,
+            dataset_points: ds.meta.n_points,
+            camera_center: self.camera.center,
+            camera_pixels_per_unit: self.camera.pixels_per_unit,
+            keyframes,
+            key_times: self.key_times.clone(),
+            color_path_enabled: self.color_path_enabled,
+            color_mode: self.color_mode,
+            active_obs,
+            gene_selected: self.gene_selected.clone(),
+            categorical_palette: self.categorical_palette,
+            category_overrides,
+            global_filters,
+            playback_mode: self.playback_mode,
+            ease_mode: self.ease_mode,
+            speed: self.speed,
+            t: self.t,
+            point_radius_px: self.point_radius_px,
+            max_draw_points: self.max_draw_points,
+            export_encoding_speed: self.export_encoding_speed,
+            background_rgba: [bg.r(), bg.g(), bg.b(), bg.a()],
+            ui_scale: self.ui_scale,
+            ui_theme: self.ui_theme,
+            show_axes: self.show_axes,
+            show_stats: self.show_stats,
+            sample_grid: WorkspaceSampleGrid {
+                enabled: self.sample_grid_enabled,
+                obs: self
+                    .sample_grid_obs_idx
+                    .and_then(|idx| ds.meta.obs.get(idx))
+                    .map(|obs| match obs {
+                        ObsMeta::Categorical { name, .. } | ObsMeta::Continuous { name, .. } => {
+                            name.clone()
+                        }
+                    }),
+                space: self
+                    .sample_grid_space_idx
+                    .and_then(|idx| ds.meta.spaces.get(idx))
+                    .map(|space| space.name.clone()),
+                use_filter: self.sample_grid_use_filter,
+                padding: self.sample_grid_padding,
+                labels_enabled: self.sample_grid_labels_enabled,
+                label_mode: self.sample_grid_label_mode,
+                custom_labels: self.sample_grid_custom_labels.clone(),
+            },
+        })
+    }
+
+    fn save_workspace_dialog(&mut self) -> anyhow::Result<()> {
+        let workspace = self.build_workspace()?;
+        let dataset_path = workspace.dataset_path.clone();
+        let stem = dataset_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("stviz")
+            .to_string();
+        let mut dialog = rfd::FileDialog::new()
+            .add_filter("stviz workspace", &["json"])
+            .set_title("Save workspace")
+            .set_file_name(format!("{stem}.workspace.json"));
+        if let Some(parent) = dataset_path.parent() {
+            dialog = dialog.set_directory(parent);
+        }
+        let Some(path) = dialog.save_file() else {
+            return Ok(());
+        };
+        let json = serde_json::to_string_pretty(&workspace)?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("write workspace: {}", path.display()))?;
+        self.workspace_status = Some(format!("Saved workspace: {}", path.display()));
+        Ok(())
+    }
+
+    fn open_workspace_dialog(&mut self) -> anyhow::Result<()> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("stviz workspace", &["json"])
+            .set_title("Open workspace")
+            .set_directory(self.project_dir.clone())
+            .pick_file()
+        else {
+            return Ok(());
+        };
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("read workspace: {}", path.display()))?;
+        let mut workspace: WorkspaceFile = serde_json::from_str(&json)?;
+        if workspace.version != 1 {
+            return Err(anyhow::anyhow!(
+                "unsupported workspace version {}",
+                workspace.version
+            ));
+        }
+        if workspace.dataset_path.is_relative() {
+            workspace.dataset_path = path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .join(&workspace.dataset_path);
+        }
+        self.apply_workspace(workspace)?;
+        self.workspace_status = Some(format!("Opened workspace: {}", path.display()));
+        Ok(())
+    }
+
+    fn apply_workspace(&mut self, workspace: WorkspaceFile) -> anyhow::Result<()> {
+        self.load_dataset(&workspace.dataset_path)?;
+        let ds = self.dataset.clone().unwrap();
+        if ds.meta.n_points != workspace.dataset_points {
+            return Err(anyhow::anyhow!(
+                "workspace expects {} cells, dataset has {}",
+                workspace.dataset_points,
+                ds.meta.n_points
+            ));
+        }
+        if workspace.keyframes.len() < 2 {
+            return Err(anyhow::anyhow!(
+                "workspace must contain at least two keyframes"
+            ));
+        }
+
+        let mut spaces = Vec::with_capacity(workspace.keyframes.len());
+        let mut colors = Vec::with_capacity(workspace.keyframes.len());
+        let mut filters = Vec::with_capacity(workspace.keyframes.len());
+        for key in &workspace.keyframes {
+            let space_idx = ds
+                .meta
+                .spaces
+                .iter()
+                .position(|space| space.name == key.space)
+                .ok_or_else(|| anyhow::anyhow!("space not found: {}", key.space))?;
+            let color = match &key.color {
+                WorkspaceColor::Current => ColorKey::Current,
+                WorkspaceColor::Gene(name) => ColorKey::Gene(name.clone()),
+                WorkspaceColor::Categorical(name) => ColorKey::Categorical(
+                    ds.meta
+                        .obs
+                        .iter()
+                        .position(
+                            |obs| matches!(obs, ObsMeta::Categorical { name: n, .. } if n == name),
+                        )
+                        .ok_or_else(|| anyhow::anyhow!("categorical field not found: {name}"))?,
+                ),
+                WorkspaceColor::Continuous(name) => ColorKey::Continuous(
+                    ds.meta
+                        .obs
+                        .iter()
+                        .position(
+                            |obs| matches!(obs, ObsMeta::Continuous { name: n, .. } if n == name),
+                        )
+                        .ok_or_else(|| anyhow::anyhow!("continuous field not found: {name}"))?,
+                ),
+            };
+            spaces.push(space_idx);
+            colors.push(color);
+            filters.push(
+                key.filter
+                    .as_ref()
+                    .map(|filter| Self::resolve_workspace_filter(&ds, filter))
+                    .transpose()?,
+            );
+        }
+
+        self.space_path = spaces;
+        self.color_path = colors;
+        self.filter_path = filters;
+        self.key_times = workspace.key_times;
+        if self.key_times.len() != self.space_path.len()
+            || self.key_times.iter().any(|t| !t.is_finite())
+            || self.key_times.windows(2).any(|pair| pair[0] > pair[1])
+        {
+            self.key_times.clear();
+            self.ensure_key_times_len(self.space_path.len());
+        }
+        self.key_collapsed = vec![false; self.space_path.len()];
+        self.from_space = self.space_path[0];
+        self.to_space = *self.space_path.last().unwrap();
+        self.color_path_enabled = workspace.color_path_enabled;
+        self.color_mode = workspace.color_mode;
+        self.categorical_palette = workspace.categorical_palette;
+        self.playback_mode = workspace.playback_mode;
+        self.ease_mode = workspace.ease_mode;
+        self.speed = workspace.speed;
+        self.t = workspace.t.clamp(0.0, 1.0);
+        self.point_radius_px = workspace.point_radius_px;
+        self.max_draw_points = workspace.max_draw_points;
+        self.export_encoding_speed = workspace.export_encoding_speed;
+        self.background_color = egui::Color32::from_rgba_unmultiplied(
+            workspace.background_rgba[0],
+            workspace.background_rgba[1],
+            workspace.background_rgba[2],
+            workspace.background_rgba[3],
+        );
+        self.ui_scale = workspace.ui_scale.clamp(0.5, 3.0);
+        self.ui_theme = workspace.ui_theme;
+        self.show_axes = workspace.show_axes;
+        self.show_stats = workspace.show_stats;
+        self.camera.center = workspace.camera_center;
+        self.camera.pixels_per_unit = workspace.camera_pixels_per_unit.clamp(1e-6, 1e9);
+
+        if let Some(name) = workspace.active_obs {
+            if let Some(idx) = ds.meta.obs.iter().position(|obs| match obs {
+                ObsMeta::Categorical { name: n, .. } | ObsMeta::Continuous { name: n, .. } => {
+                    n == &name
+                }
+            }) {
+                self.active_obs_idx = idx;
+            }
+        }
+        self.category_overrides.clear();
+        for saved in workspace.category_overrides {
+            if let Some(obs_idx) = ds.meta.obs.iter().position(
+                |obs| matches!(obs, ObsMeta::Categorical { name, .. } if name == &saved.field),
+            ) {
+                let (_name, _labels, categories, _pal) = ds.obs_categorical(obs_idx)?;
+                self.category_overrides.insert(
+                    obs_idx,
+                    categories
+                        .iter()
+                        .map(|name| saved.colors.get(name).copied())
+                        .collect(),
+                );
+            }
+        }
+        self.active_filters.clear();
+        self.category_state.clear();
+        for saved in workspace.global_filters {
+            let filter = Self::resolve_workspace_filter(&ds, &saved)?;
+            self.active_filters.insert(filter.obs_idx);
+            self.category_state.insert(filter.obs_idx, filter.enabled);
+        }
+        self.load_filter_state(&ds);
+
+        self.sample_grid_enabled = workspace.sample_grid.enabled;
+        self.sample_grid_obs_idx = workspace.sample_grid.obs.as_ref().and_then(|name| {
+            ds.meta
+                .obs
+                .iter()
+                .position(|obs| matches!(obs, ObsMeta::Categorical { name: n, .. } if n == name))
+        });
+        self.sample_grid_space_idx = workspace
+            .sample_grid
+            .space
+            .as_ref()
+            .and_then(|name| ds.meta.spaces.iter().position(|space| &space.name == name));
+        self.sample_grid_use_filter = workspace.sample_grid.use_filter;
+        self.sample_grid_padding = workspace.sample_grid.padding;
+        self.sample_grid_labels_enabled = workspace.sample_grid.labels_enabled;
+        self.sample_grid_label_mode = workspace.sample_grid.label_mode;
+        self.sample_grid_custom_labels = workspace.sample_grid.custom_labels;
+        self.sample_grid_custom_labels_obs_idx = self.sample_grid_obs_idx;
+
+        self.advanced_cards.clear();
+        self.advanced_connections.clear();
+        self.color_cache.clear();
+        self.filtered_color_cache.clear();
+        self.category_palette_cache = None;
+        self.recompute_colors_and_filters()?;
+        self.gene_selected = workspace.gene_selected;
+        if self.color_mode == ColorMode::Gene {
+            if let Some(gene) = self.gene_selected.clone() {
+                self.gene_query = gene.clone();
+                if let Some((colors, legend, opaque)) =
+                    self.compute_colors_for_key(&ds, &ColorKey::Gene(gene))
+                {
+                    self.colors_rgba8 = Arc::new(colors);
+                    self.colors_opaque = opaque;
+                    self.colors_id = self.next_color_id();
+                    self.legend_range = legend;
+                }
+            }
+        }
+        self.mark_grid_dirty();
+        Ok(())
+    }
+
     fn load_dataset(&mut self, path: &Path) -> anyhow::Result<()> {
         let ds = Dataset::load(path).context("load dataset")?;
         self.dataset = Some(ds.clone());
@@ -756,9 +1268,11 @@ impl StvizApp {
         self.color_path.clear();
         self.color_path.push(ColorKey::Current);
         self.color_path.push(ColorKey::Current);
+        self.filter_path = vec![None; self.space_path.len()];
         self.key_times = vec![0.0, 1.0];
         self.key_collapsed = vec![false; self.space_path.len()];
         self.color_cache.clear();
+        self.filtered_color_cache.clear();
         self.category_state.clear();
         self.category_overrides.clear();
         self.category_palette_cache = None;
@@ -800,6 +1314,7 @@ impl StvizApp {
                 self.from_space = *self.space_path.first().unwrap_or(&self.from_space);
                 self.to_space = *self.space_path.last().unwrap_or(&self.to_space);
                 self.color_path = vec![ColorKey::Current; self.space_path.len()];
+                self.filter_path = vec![None; self.space_path.len()];
                 let n_keys = self.space_path.len();
                 self.key_times = if n_keys > 1 {
                     (0..n_keys)
@@ -2644,6 +3159,90 @@ Then add that path to your system environment variables (PATH).";
         }));
     }
 
+    fn try_start_direct_video_export(&mut self) -> Result<bool, String> {
+        if !self.export_run_ffmpeg || self.export_keep_frames {
+            return Ok(false);
+        }
+        let Some(size) = self.export_resolution else {
+            return Ok(false);
+        };
+        let Some(ffmpeg) = self.ffmpeg_path.clone() else {
+            return Ok(false);
+        };
+        let Some(output) = self.export_temp_output_path.clone() else {
+            return Ok(false);
+        };
+        let Some(render_state) = self.render_state.as_ref() else {
+            return Ok(false);
+        };
+        let input_format = match render_state.target_format {
+            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb => "bgra",
+            wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => "rgba",
+            _ => return Ok(false),
+        };
+        let (crf, output_format) = match self.export_video_quality {
+            ExportVideoQuality::Standard => (23, "yuv420p"),
+            ExportVideoQuality::High => (18, "yuv420p"),
+            ExportVideoQuality::Ultra => (14, "yuv420p"),
+        };
+        let preset = self.export_encoding_speed.preset();
+        let stderr_path = self.export_dir.join("ffmpeg_stderr.log");
+        let stderr =
+            std::fs::File::create(&stderr_path).map_err(|e| format!("create ffmpeg log: {e}"))?;
+        let mut cmd = Command::new(ffmpeg);
+        Self::apply_subprocess_flags(&mut cmd);
+        let mut child = cmd
+            .arg("-y")
+            .arg("-f")
+            .arg("rawvideo")
+            .arg("-pix_fmt")
+            .arg(input_format)
+            .arg("-video_size")
+            .arg(format!("{}x{}", size[0], size[1]))
+            .arg("-framerate")
+            .arg(self.export_fps.to_string())
+            .arg("-i")
+            .arg("pipe:0")
+            .arg("-an")
+            .arg("-c:v")
+            .arg("libx264")
+            .arg("-preset")
+            .arg(preset)
+            .arg("-crf")
+            .arg(crf.to_string())
+            .arg("-pix_fmt")
+            .arg(output_format)
+            .arg("-movflags")
+            .arg("+faststart")
+            .arg(&output)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .spawn()
+            .map_err(|e| format!("start direct ffmpeg export: {e}"))?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "ffmpeg stdin unavailable".to_string())?;
+        self.direct_video_export = Some(DirectVideoExport {
+            child,
+            stdin: Some(stdin),
+            stderr_path,
+        });
+        self.append_export_log(&format!(
+            "Direct ffmpeg streaming enabled ({input_format} raw frames)."
+        ));
+        Ok(true)
+    }
+
+    fn abort_direct_video_export(&mut self) {
+        if let Some(mut direct) = self.direct_video_export.take() {
+            direct.stdin.take();
+            let _ = direct.child.kill();
+            let _ = direct.child.wait();
+        }
+    }
+
     fn start_export_loop(&mut self) {
         if self.exporting_loop {
             return;
@@ -2677,6 +3276,15 @@ Then add that path to your system environment variables (PATH).";
         self.export_status = Some(format!("Exporting {total} frames ({:.2}s)...", duration));
         self.playing = false;
         self.export_camera = None;
+        self.abort_direct_video_export();
+
+        if let (Some(size), Some(ds)) = (self.export_resolution, self.dataset.clone()) {
+            if let Some(bbox) = self.export_fit_bbox(&ds) {
+                let mut camera = Camera2D::default();
+                camera.fit_bbox(bbox, [size[0] as f32, size[1] as f32], 0.98);
+                self.export_camera = Some(camera);
+            }
+        }
 
         self.append_export_log("Loop export started.");
         self.append_export_log(&format!("Frames directory: {}", self.export_dir.display()));
@@ -2719,11 +3327,12 @@ Then add that path to your system environment variables (PATH).";
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "not found".to_string());
             self.append_export_log(&format!("ffmpeg: {}", ffmpeg_label));
-            let (crf, preset, pix_fmt) = match self.export_video_quality {
-                ExportVideoQuality::Standard => (23, "medium", "yuv420p"),
-                ExportVideoQuality::High => (18, "slow", "yuv420p"),
-                ExportVideoQuality::Ultra => (14, "slow", "yuv420p"),
+            let (crf, pix_fmt) = match self.export_video_quality {
+                ExportVideoQuality::Standard => (23, "yuv420p"),
+                ExportVideoQuality::High => (18, "yuv420p"),
+                ExportVideoQuality::Ultra => (14, "yuv420p"),
             };
+            let preset = self.export_encoding_speed.preset();
             self.append_export_log(&format!(
                 "Encoding: libx264, CRF {crf}, preset {preset}, {pix_fmt}"
             ));
@@ -2779,6 +3388,13 @@ Then add that path to your system environment variables (PATH).";
         for line in dataset_lines {
             self.append_export_log(&line);
         }
+        match self.try_start_direct_video_export() {
+            Ok(true) => self.append_export_log("PNG frame staging bypassed."),
+            Ok(false) => self.append_export_log("Using PNG frame staging."),
+            Err(e) => self.append_export_log(&format!(
+                "Direct ffmpeg streaming unavailable ({e}); using PNG frame staging."
+            )),
+        }
     }
 
     fn finish_export_loop(&mut self) {
@@ -2794,6 +3410,43 @@ Then add that path to your system environment variables (PATH).";
             .unwrap_or_else(|| self.managed_export_temp_path(&final_out_path));
         self.export_camera = None;
         let keep_frames = self.export_keep_frames;
+        if let Some(mut direct) = self.direct_video_export.take() {
+            direct.stdin.take();
+            let result = direct.child.wait();
+            let stderr = std::fs::read_to_string(&direct.stderr_path).unwrap_or_default();
+            if !stderr.trim().is_empty() {
+                self.append_export_log("ffmpeg output:");
+                self.append_export_log(stderr.trim());
+            }
+            match result {
+                Ok(status) if status.success() => {
+                    match self.finalize_export_output(&temp_out_path, &final_out_path) {
+                        Ok(()) => {
+                            self.export_status =
+                                Some(format!("Wrote video: {}", final_out_path.display()));
+                            self.append_export_log("Direct video export succeeded.");
+                            self.remove_export_frames(&frames_dir);
+                        }
+                        Err(e) => {
+                            self.export_status = Some(format!("Export finalize failed: {e}"));
+                            self.append_export_log(&format!("Export finalize failed: {e}"));
+                            self.remove_export_output();
+                        }
+                    }
+                }
+                Ok(status) => {
+                    self.export_status = Some(format!("ffmpeg failed: {status}"));
+                    self.append_export_log(&format!("Direct ffmpeg export failed: {status}"));
+                    self.remove_export_output();
+                }
+                Err(e) => {
+                    self.export_status = Some(format!("ffmpeg wait failed: {e}"));
+                    self.append_export_log(&format!("Direct ffmpeg wait failed: {e}"));
+                    self.remove_export_output();
+                }
+            }
+            return;
+        }
         if !self.export_run_ffmpeg {
             self.export_temp_output_path = None;
             self.export_status = Some(format!(
@@ -2815,11 +3468,12 @@ Then add that path to your system environment variables (PATH).";
             let out_str = temp_out_path.to_string_lossy().to_string();
             let mut cmd = std::process::Command::new(&ffmpeg_bin);
             Self::apply_subprocess_flags(&mut cmd);
-            let (crf, preset, pix_fmt) = match self.export_video_quality {
-                ExportVideoQuality::Standard => (23, "medium", "yuv420p"),
-                ExportVideoQuality::High => (18, "slow", "yuv420p"),
-                ExportVideoQuality::Ultra => (14, "slow", "yuv420p"),
+            let (crf, pix_fmt) = match self.export_video_quality {
+                ExportVideoQuality::Standard => (23, "yuv420p"),
+                ExportVideoQuality::High => (18, "yuv420p"),
+                ExportVideoQuality::Ultra => (14, "yuv420p"),
             };
+            let preset = self.export_encoding_speed.preset();
             let output = cmd
                 .arg("-y")
                 .arg("-framerate")
@@ -2934,6 +3588,7 @@ Then add that path to your system environment variables (PATH).";
         self.export_camera = None;
         self.export_status = Some("Export cancelled.".to_string());
         self.append_export_log("Export cancelled.");
+        self.abort_direct_video_export();
         if self.export_pending_frames == 0 {
             self.export_cancelled = false;
             let frames_dir = self.export_dir.clone();
@@ -3142,8 +3797,8 @@ Then add that path to your system environment variables (PATH).";
         let (active_from, active_to, color_from, color_to, segment_t, _seg_idx) =
             self.current_segment(&ds);
         let viewport_px = [size[0] as f32, size[1] as f32];
-        let mut view_camera = self.camera;
-        if use_export_bbox {
+        let mut view_camera = self.export_camera.unwrap_or(self.camera);
+        if use_export_bbox && self.export_camera.is_none() {
             let bbox = self
                 .current_plot_bbox_for_segment(
                     &ds,
@@ -3175,7 +3830,11 @@ Then add that path to your system environment variables (PATH).";
         };
 
         let t_eased = apply_ease(segment_t, self.ease_mode);
-        let color_t = if color_from != color_to { t_eased } else { 0.0 };
+        let color_t = if color_from != color_to || colors_id != colors_to_id {
+            t_eased
+        } else {
+            0.0
+        };
         let mut point_radius_px = self.point_radius_px;
         if self.last_viewport_points.width() > 0.0 {
             let ppp = self.last_viewport_px[0] / self.last_viewport_points.width();
@@ -3361,6 +4020,27 @@ Then add that path to your system environment variables (PATH).";
             .map_err(|e| format!("Export buffer map failed: {e:?}"))?;
 
         let data = buffer_slice.get_mapped_range();
+        if use_export_bbox && self.direct_video_export.is_some() {
+            let mut frame = vec![0u8; (size[0] * size[1] * bytes_per_pixel) as usize];
+            for row in 0..size[1] as usize {
+                let src = row * padded_bytes_per_row as usize;
+                let dst = row * unpadded_bytes_per_row as usize;
+                frame[dst..dst + unpadded_bytes_per_row as usize]
+                    .copy_from_slice(&data[src..src + unpadded_bytes_per_row as usize]);
+            }
+            drop(data);
+            output_buffer.unmap();
+            let stdin = self
+                .direct_video_export
+                .as_mut()
+                .and_then(|direct| direct.stdin.as_mut())
+                .ok_or_else(|| "ffmpeg input stream unavailable".to_string())?;
+            stdin
+                .write_all(&frame)
+                .map_err(|e| format!("write raw frame to ffmpeg: {e}"))?;
+            return Ok(());
+        }
+
         let mut rgba = vec![0u8; (size[0] * size[1] * bytes_per_pixel) as usize];
         let is_bgra = matches!(
             target_format,
@@ -3545,6 +4225,24 @@ Then add that path to your system environment variables (PATH).";
                 eprintln!("{msg}");
                 self.last_error = Some(msg);
             }
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.dataset.is_some(), egui::Button::new("Save workspace"))
+                .clicked()
+            {
+                if let Err(e) = self.save_workspace_dialog() {
+                    self.workspace_status = Some(format!("Workspace save failed: {e:#}"));
+                }
+            }
+            if ui.button("Open workspace").clicked() {
+                if let Err(e) = self.open_workspace_dialog() {
+                    self.workspace_status = Some(format!("Workspace open failed: {e:#}"));
+                }
+            }
+        });
+        if let Some(status) = &self.workspace_status {
+            ui.small(status);
         }
 
         ui.horizontal(|ui| {
@@ -4453,6 +5151,33 @@ Then add that path to your system environment variables (PATH).";
                     });
             });
             ui.horizontal(|ui| {
+                ui.label("Encoding speed");
+                let label = match self.export_encoding_speed {
+                    ExportEncodingSpeed::Fast => "Fast (larger file)",
+                    ExportEncodingSpeed::Balanced => "Balanced",
+                    ExportEncodingSpeed::SmallestFile => "Smallest file (slower)",
+                };
+                egui::ComboBox::from_id_salt("export_encoding_speed")
+                    .selected_text(label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.export_encoding_speed,
+                            ExportEncodingSpeed::Fast,
+                            "Fast (larger file)",
+                        );
+                        ui.selectable_value(
+                            &mut self.export_encoding_speed,
+                            ExportEncodingSpeed::Balanced,
+                            "Balanced",
+                        );
+                        ui.selectable_value(
+                            &mut self.export_encoding_speed,
+                            ExportEncodingSpeed::SmallestFile,
+                            "Smallest file (slower)",
+                        );
+                    });
+            });
+            ui.horizontal(|ui| {
                 ui.label("Output");
                 ui.text_edit_singleline(&mut self.export_name);
             });
@@ -4735,25 +5460,33 @@ Then add that path to your system environment variables (PATH).";
                 }
                 legend_from = cf_legend;
             }
+
+            let (filter_from, filter_to) = self.segment_filters(seg_idx);
+            let (cf, cf_id, from_filtered) =
+                self.colors_with_filter(ds, colors_from, colors_from_id, filter_from.as_ref());
+            let (ct, ct_id, to_filtered) =
+                self.colors_with_filter(ds, colors_to, colors_to_id, filter_to.as_ref());
+            colors_from = cf;
+            colors_from_id = cf_id;
+            colors_to = ct;
+            colors_to_id = ct_id;
+            colors_from_opaque &= !from_filtered;
+            colors_to_opaque &= !to_filtered;
+            if colors_from_id != colors_to_id {
+                color_t = t_eased;
+            }
         }
 
         let mut draw_indices = self.draw_indices.clone();
         let mut indices_id = self.indices_id;
         if let Some(ds) = ds_opt.as_ref() {
-            let mut override_idx = None;
             if self.advanced_timeline_open && !self.playing {
                 if let Some(preview_idx) = self.advanced_preview_card {
-                    override_idx = Some(preview_idx);
+                    if let Some((indices, id)) = self.advanced_draw_override(ds, preview_idx) {
+                        draw_indices = indices;
+                        indices_id = id;
+                    }
                 }
-            }
-            if let Some(idx) = override_idx {
-                if let Some((indices, id)) = self.advanced_draw_override(ds, idx) {
-                    draw_indices = indices;
-                    indices_id = id;
-                }
-            } else if let Some((indices, id)) = self.advanced_draw_override(ds, seg_idx) {
-                draw_indices = indices;
-                indices_id = id;
             }
             let n_points = ds.meta.n_points;
             if draw_indices.iter().any(|&idx| idx >= n_points) {
@@ -4845,6 +5578,12 @@ Then add that path to your system environment variables (PATH).";
                     self.export_status = Some(format!("Export failed: {err}"));
                     self.exporting_loop = false;
                     self.export_camera = None;
+                    if self.direct_video_export.is_some() {
+                        self.abort_direct_video_export();
+                        self.remove_export_output();
+                        let export_dir = self.export_dir.clone();
+                        self.remove_export_frames(&export_dir);
+                    }
                     return;
                 }
             } else {
@@ -4981,21 +5720,22 @@ Then add that path to your system environment variables (PATH).";
         }
         space_indices.sort_unstable();
         space_indices.dedup();
-        let mut best = None;
-        let mut best_area = -1.0f32;
+        let mut union: Option<[f32; 4]> = None;
         for idx in space_indices {
             if let Some(space) = ds.meta.spaces.get(idx) {
                 let bbox = self.space_bbox_for_view(ds, idx, space);
-                let w = (bbox[2] - bbox[0]).max(1e-6);
-                let h = (bbox[3] - bbox[1]).max(1e-6);
-                let area = w * h;
-                if area > best_area {
-                    best_area = area;
-                    best = Some(bbox);
-                }
+                union = Some(match union {
+                    Some(current) => [
+                        current[0].min(bbox[0]),
+                        current[1].min(bbox[1]),
+                        current[2].max(bbox[2]),
+                        current[3].max(bbox[3]),
+                    ],
+                    None => bbox,
+                });
             }
         }
-        best
+        union
     }
 
     fn space_transform(
@@ -5391,6 +6131,10 @@ Then add that path to your system environment variables (PATH).";
         }
     }
 
+    fn ensure_filter_path_len(&mut self, len: usize) {
+        self.filter_path.resize(len, None);
+    }
+
     fn ensure_space_path_len(&mut self, ds: &Dataset, len: usize) {
         let max_idx = ds.meta.spaces.len().saturating_sub(1);
         if self.space_path.is_empty() {
@@ -5469,6 +6213,7 @@ Then add that path to your system environment variables (PATH).";
         if self.color_path.len() != len {
             self.ensure_color_path_len(len);
         }
+        self.ensure_filter_path_len(len);
         if self.key_times.len() != len {
             self.ensure_key_times_len(len);
         }
@@ -5478,11 +6223,13 @@ Then add that path to your system environment variables (PATH).";
 
         let space = self.space_path.remove(from);
         let color = self.color_path.remove(from);
+        let filter = self.filter_path.remove(from);
         let time = self.key_times.remove(from);
         let collapsed = self.key_collapsed.remove(from);
 
         self.space_path.insert(to, space);
         self.color_path.insert(to, color);
+        self.filter_path.insert(to, filter);
         self.key_times.insert(to, time);
         self.key_collapsed.insert(to, collapsed);
 
@@ -5506,6 +6253,9 @@ Then add that path to your system environment variables (PATH).";
         self.space_path.remove(idx);
         if idx < self.color_path.len() {
             self.color_path.remove(idx);
+        }
+        if idx < self.filter_path.len() {
+            self.filter_path.remove(idx);
         }
         if idx < self.key_times.len() {
             self.key_times.remove(idx);
@@ -5666,6 +6416,80 @@ Then add that path to your system environment variables (PATH).";
             self.colors_id,
             self.legend_range.clone(),
             self.colors_opaque,
+        )
+    }
+
+    fn colors_with_filter(
+        &mut self,
+        ds: &Dataset,
+        colors: Arc<Vec<u32>>,
+        colors_id: u64,
+        filter: Option<&KeyframeFilter>,
+    ) -> (Arc<Vec<u32>>, u64, bool) {
+        let Some(filter) = filter else {
+            return (colors, colors_id, false);
+        };
+        let Ok((_name, labels, categories, _pal)) = ds.obs_categorical(filter.obs_idx) else {
+            return (colors, colors_id, false);
+        };
+        if filter.enabled.len() != categories.len() || filter.enabled.iter().all(|v| *v) {
+            return (colors, colors_id, false);
+        }
+
+        let filtered_id = Self::advanced_filter_signature(
+            self.dataset_id ^ colors_id.rotate_left(17),
+            filter.obs_idx,
+            colors.len(),
+            &filter.enabled,
+        );
+        if let Some(cached) = self.filtered_color_cache.get(&filtered_id) {
+            return (cached.clone(), filtered_id, true);
+        }
+
+        let mut filtered = colors.as_ref().clone();
+        for (i, &label) in labels.iter().enumerate() {
+            if !filter.enabled.get(label as usize).copied().unwrap_or(false) {
+                filtered[i] &= 0x00ff_ffff;
+            }
+        }
+        let filtered = Arc::new(filtered);
+        if self.filtered_color_cache.len() >= 4 {
+            self.filtered_color_cache.clear();
+        }
+        self.filtered_color_cache
+            .insert(filtered_id, filtered.clone());
+        (filtered, filtered_id, true)
+    }
+
+    fn segment_filters(&self, seg_idx: usize) -> (Option<KeyframeFilter>, Option<KeyframeFilter>) {
+        if self.advanced_timeline_open && self.advanced_cards.len() == self.space_path.len() {
+            let to_key = |filter: &Option<AdvancedCardFilter>| {
+                filter.as_ref().map(|filter| KeyframeFilter {
+                    obs_idx: filter.obs_idx,
+                    enabled: filter.enabled.clone(),
+                })
+            };
+            if !self.playing {
+                if let Some(preview_idx) = self.advanced_preview_card {
+                    let filter = self
+                        .advanced_cards
+                        .get(preview_idx)
+                        .and_then(|card| to_key(&card.filter));
+                    return (filter.clone(), filter);
+                }
+            }
+            return (
+                self.advanced_cards
+                    .get(seg_idx)
+                    .and_then(|card| to_key(&card.filter)),
+                self.advanced_cards
+                    .get(seg_idx + 1)
+                    .and_then(|card| to_key(&card.filter)),
+            );
+        }
+        (
+            self.filter_path.get(seg_idx).cloned().flatten(),
+            self.filter_path.get(seg_idx + 1).cloned().flatten(),
         )
     }
 
@@ -5862,6 +6686,7 @@ Then add that path to your system environment variables (PATH).";
         let desired_len = self.space_path.len().max(2);
         self.ensure_space_path_len(ds_ref, desired_len);
         self.ensure_color_path_len(self.space_path.len());
+        self.ensure_filter_path_len(self.space_path.len());
         if self.key_times.len() != self.space_path.len() {
             self.ensure_key_times_len(self.space_path.len());
         }
@@ -6111,8 +6936,10 @@ Then add that path to your system environment variables (PATH).";
                 if self.space_path.len() >= 2 {
                     let space = *self.space_path.last().unwrap_or(&0);
                     let color = self.color_path.last().cloned().unwrap_or(ColorKey::Current);
+                    let filter = self.filter_path.last().cloned().unwrap_or(None);
                     self.space_path.push(space);
                     self.color_path.push(color);
+                    self.filter_path.push(filter);
                     self.key_times.resize(self.space_path.len(), 0.0);
                     if self.key_collapsed.len() != self.space_path.len() {
                         self.key_collapsed.resize(self.space_path.len(), false);
@@ -6185,6 +7012,18 @@ Then add that path to your system environment variables (PATH).";
                 _ => None,
             })
             .collect();
+        let filterable_opts: Vec<(usize, String)> = ds_ref
+            .meta
+            .obs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| match o {
+                ObsMeta::Categorical {
+                    name, categories, ..
+                } if categories.len() <= MAX_FILTER_CATEGORIES => Some((i, name.clone())),
+                _ => None,
+            })
+            .collect();
         let continuous_opts: Vec<(usize, String)> = ds_ref
             .meta
             .obs
@@ -6214,6 +7053,7 @@ Then add that path to your system environment variables (PATH).";
                         let mut space_idx = self.space_path[i].min(max_idx);
                         let mut color_key =
                             self.color_path.get(i).cloned().unwrap_or(ColorKey::Current);
+                        let mut key_filter = self.filter_path.get(i).cloned().unwrap_or(None);
                         let mut color_kind = match color_key {
                             ColorKey::Current => KeyColorKind::Current,
                             ColorKey::Categorical(_) => KeyColorKind::Categorical,
@@ -6490,6 +7330,110 @@ Then add that path to your system environment variables (PATH).";
                                             }
                                         }
                                     }
+
+                                    if key_filter.as_ref().is_some_and(|filter| {
+                                        !filterable_opts
+                                            .iter()
+                                            .any(|(idx, _)| *idx == filter.obs_idx)
+                                    }) {
+                                        key_filter = None;
+                                    }
+                                    let mut filter_enabled = key_filter.is_some();
+                                    if ui
+                                        .add_enabled(
+                                            !filterable_opts.is_empty(),
+                                            egui::Checkbox::new(&mut filter_enabled, "Filter"),
+                                        )
+                                        .on_disabled_hover_text(format!(
+                                            "No categorical fields with {} or fewer categories.",
+                                            MAX_FILTER_CATEGORIES
+                                        ))
+                                        .changed()
+                                    {
+                                        if filter_enabled {
+                                            if let Some((obs_idx, _)) = filterable_opts.first() {
+                                                if let Ok((_name, _labels, categories, _pal)) =
+                                                    ds_ref.obs_categorical(*obs_idx)
+                                                {
+                                                    key_filter = Some(KeyframeFilter {
+                                                        obs_idx: *obs_idx,
+                                                        enabled: vec![true; categories.len()],
+                                                    });
+                                                }
+                                            }
+                                        } else {
+                                            key_filter = None;
+                                        }
+                                    }
+                                    if let Some(filter) = key_filter.as_mut() {
+                                        let mut obs_idx = filter.obs_idx;
+                                        egui::ComboBox::from_id_salt(("kf_filter_obs", i))
+                                            .width(control_width)
+                                            .selected_text(
+                                                filterable_opts
+                                                    .iter()
+                                                    .find(|(idx, _)| *idx == obs_idx)
+                                                    .map(|(_, name)| name.as_str())
+                                                    .unwrap_or("Categorical"),
+                                            )
+                                            .show_ui(ui, |ui| {
+                                                for (idx, name) in &filterable_opts {
+                                                    ui.selectable_value(&mut obs_idx, *idx, name);
+                                                }
+                                            });
+                                        if obs_idx != filter.obs_idx {
+                                            filter.obs_idx = obs_idx;
+                                            if let Ok((_name, _labels, categories, _pal)) =
+                                                ds_ref.obs_categorical(obs_idx)
+                                            {
+                                                filter.enabled = vec![true; categories.len()];
+                                            }
+                                        }
+                                        if let Ok((_name, _labels, categories, _pal)) =
+                                            ds_ref.obs_categorical(filter.obs_idx)
+                                        {
+                                            if filter.enabled.len() != categories.len() {
+                                                filter.enabled = vec![true; categories.len()];
+                                            }
+                                            let selected =
+                                                filter.enabled.iter().filter(|v| **v).count();
+                                            egui::containers::menu::MenuButton::new(format!(
+                                                "Categories {selected}/{}",
+                                                categories.len()
+                                            ))
+                                            .config(
+                                                egui::containers::menu::MenuConfig::new()
+                                                    .close_behavior(
+                                                    egui::PopupCloseBehavior::CloseOnClickOutside,
+                                                ),
+                                            )
+                                            .ui(
+                                                ui,
+                                                |ui| {
+                                                    ui.horizontal(|ui| {
+                                                        if ui.button("All").clicked() {
+                                                            filter.enabled.fill(true);
+                                                        }
+                                                        if ui.button("None").clicked() {
+                                                            filter.enabled.fill(false);
+                                                        }
+                                                    });
+                                                    egui::ScrollArea::vertical()
+                                                        .max_height(240.0)
+                                                        .show(ui, |ui| {
+                                                            for (idx, name) in
+                                                                categories.iter().enumerate()
+                                                            {
+                                                                ui.checkbox(
+                                                                    &mut filter.enabled[idx],
+                                                                    name,
+                                                                );
+                                                            }
+                                                        });
+                                                },
+                                            );
+                                        }
+                                    }
                                     ui.spacing_mut().item_spacing = prev_spacing;
                                 })
                             },
@@ -6502,6 +7446,7 @@ Then add that path to your system environment variables (PATH).";
                         } else {
                             self.color_path.push(color_key);
                         }
+                        self.filter_path[i] = key_filter;
                         self.key_collapsed[i] = collapsed;
                         ui.add_space(6.0);
                     }
@@ -6587,6 +7532,7 @@ Then add that path to your system environment variables (PATH).";
         }
 
         self.ensure_color_path_len(self.space_path.len());
+        self.ensure_filter_path_len(self.space_path.len());
         self.from_space = *self.space_path.first().unwrap_or(&self.from_space);
         self.to_space = *self.space_path.last().unwrap_or(&self.to_space);
 
@@ -6761,6 +7707,22 @@ Then add that path to your system environment variables (PATH).";
                     .enumerate()
                     .filter_map(|(i, o)| match o {
                         ObsMeta::Categorical { name, .. } => Some((i, name.clone())),
+                        _ => None,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let filterable_opts: Vec<(usize, String)> = ds_opt
+            .as_ref()
+            .map(|ds| {
+                ds.meta
+                    .obs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, o)| match o {
+                        ObsMeta::Categorical {
+                            name, categories, ..
+                        } if categories.len() <= MAX_FILTER_CATEGORIES => Some((i, name.clone())),
                         _ => None,
                     })
                     .collect()
@@ -7301,11 +8263,28 @@ Then add that path to your system environment variables (PATH).";
                                 ui.checkbox(&mut card.out_enabled, "Out");
                             });
 
+                            if card.filter.as_ref().is_some_and(|filter| {
+                                !filterable_opts
+                                    .iter()
+                                    .any(|(filter_idx, _)| *filter_idx == filter.obs_idx)
+                            }) {
+                                card.filter = None;
+                            }
                             let mut filter_enabled = card.filter.is_some();
-                            if ui.checkbox(&mut filter_enabled, "Filter").changed() {
+                            if ui
+                                .add_enabled(
+                                    !filterable_opts.is_empty(),
+                                    egui::Checkbox::new(&mut filter_enabled, "Filter"),
+                                )
+                                .on_disabled_hover_text(format!(
+                                    "No categorical fields with {} or fewer categories.",
+                                    MAX_FILTER_CATEGORIES
+                                ))
+                                .changed()
+                            {
                                 if filter_enabled {
                                     let obs_idx =
-                                        categorical_opts.first().map(|(idx, _)| *idx).unwrap_or(0);
+                                        filterable_opts.first().map(|(idx, _)| *idx).unwrap_or(0);
                                     card.filter = Some(AdvancedCardFilter {
                                         obs_idx,
                                         enabled: Vec::new(),
@@ -7322,20 +8301,20 @@ Then add that path to your system environment variables (PATH).";
                                 }
                             }
                             if let Some(filter) = card.filter.as_mut() {
-                                if categorical_opts.is_empty() {
-                                    ui.label("No categorical obs.");
+                                if filterable_opts.is_empty() {
+                                    ui.label("No filterable categorical obs.");
                                 } else if let Some(ds) = ds_opt.as_ref() {
                                     let mut obs_idx = filter.obs_idx;
                                     egui::ComboBox::from_id_salt(("adv_filter_obs", card.id))
                                         .selected_text(
-                                            categorical_opts
+                                            filterable_opts
                                                 .iter()
                                                 .find(|(idx, _)| *idx == obs_idx)
                                                 .map(|(_, name)| name.as_str())
                                                 .unwrap_or("Categorical"),
                                         )
                                         .show_ui(ui, |ui| {
-                                            for (idx, name) in &categorical_opts {
+                                            for (idx, name) in &filterable_opts {
                                                 ui.selectable_value(&mut obs_idx, *idx, name);
                                             }
                                         });
@@ -7613,6 +8592,8 @@ Then add that path to your system environment variables (PATH).";
         self.advanced_connections.clear();
         self.advanced_connecting = None;
         let key_count = self.space_path.len().max(1);
+        self.ensure_filter_path_len(key_count);
+        let timeline_filters = self.filter_path.clone();
         let card_size = egui::vec2(220.0, 150.0);
         let mut durations = vec![2.0; key_count];
         if self.key_times.len() == key_count {
@@ -7633,6 +8614,16 @@ Then add that path to your system environment variables (PATH).";
                     card.space_idx = self.space_path.get(i).copied().unwrap_or(0);
                     card.color_key = self.color_path.get(i).cloned().unwrap_or(ColorKey::Current);
                     card.duration_sec = durations[i].max(0.1);
+                    card.filter = timeline_filters[i]
+                        .as_ref()
+                        .map(|filter| AdvancedCardFilter {
+                            obs_idx: filter.obs_idx,
+                            enabled: filter.enabled.clone(),
+                            cached_indices: None,
+                            cached_indices_id: 0,
+                            cached_dataset_id: 0,
+                            cached_max_draw: 0,
+                        });
                 }
             }
         } else {
@@ -7660,7 +8651,16 @@ Then add that path to your system environment variables (PATH).";
                     size: card_size,
                     in_enabled: true,
                     out_enabled: true,
-                    filter: None,
+                    filter: timeline_filters[i]
+                        .as_ref()
+                        .map(|filter| AdvancedCardFilter {
+                            obs_idx: filter.obs_idx,
+                            enabled: filter.enabled.clone(),
+                            cached_indices: None,
+                            cached_indices_id: 0,
+                            cached_dataset_id: 0,
+                            cached_max_draw: 0,
+                        }),
                 });
             }
         }
@@ -7689,6 +8689,16 @@ Then add that path to your system environment variables (PATH).";
         }
         self.space_path = new_space;
         self.color_path = new_color;
+        self.filter_path = self
+            .advanced_cards
+            .iter()
+            .map(|card| {
+                card.filter.as_ref().map(|filter| KeyframeFilter {
+                    obs_idx: filter.obs_idx,
+                    enabled: filter.enabled.clone(),
+                })
+            })
+            .collect();
         self.ensure_color_path_len(self.space_path.len());
         let segs = self.space_path.len().saturating_sub(1);
         let mut durations = Vec::with_capacity(segs);
@@ -7872,6 +8882,7 @@ fn render_advanced_card_controls(
 
 impl Drop for StvizApp {
     fn drop(&mut self) {
+        self.abort_direct_video_export();
         Self::cleanup_mock_artifacts(&self.output_dir);
     }
 }
