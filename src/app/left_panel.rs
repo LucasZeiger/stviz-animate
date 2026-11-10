@@ -6,7 +6,10 @@ use super::{
     ExportVideoQuality, LegendRange, SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
     MAX_GRID_CATEGORIES, SCREENSHOT_RESOLUTION,
 };
-use crate::{color::gradient_map, data::ObsMeta};
+use crate::{
+    color::gradient_map,
+    data::{Dataset, ObsMeta},
+};
 use eframe::egui;
 use rand::seq::SliceRandom;
 use std::{path::PathBuf, sync::Arc};
@@ -15,6 +18,37 @@ impl StvizApp {
     pub(super) fn ui_left_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("stviz-animate");
 
+        self.ui_data_sources(ui, ctx);
+        self.ui_workspace_section(ui);
+
+        self.ui_view_controls(ui, ctx);
+
+        ui.separator();
+        ui.label("Loaded dataset");
+
+        let Some(ds) = self.dataset.clone() else {
+            ui.label("No dataset loaded.");
+            return;
+        };
+
+        ui.label(format!("Points: {}", ds.meta.n_points));
+        if let Some(p) = self.dataset_path.as_ref() {
+            ui.label(p.display().to_string());
+        }
+
+        ui.separator();
+        ui.label("View");
+        ui.checkbox(&mut self.show_axes, "Show axes");
+
+        self.ui_sample_grid_section(ui, &ds);
+        self.ui_color_section(ui, &ds);
+        self.ui_filters_and_legend(ui, &ds);
+        self.ui_rendering_section(ui, &ds);
+        self.ui_output_section(ui);
+    }
+
+    /// Mock dataset generation, the .h5ad/.stviz drop zone and the conversion log.
+    fn ui_data_sources(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.separator();
         ui.label("Mock dataset");
         ui.horizontal(|ui| {
@@ -155,7 +189,10 @@ impl StvizApp {
                         );
                     });
             });
+    }
 
+    /// Open/save buttons for datasets and workspaces, plus the last error.
+    fn ui_workspace_section(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         if ui
             .button("Open .stviz")
@@ -213,7 +250,10 @@ impl StvizApp {
         if let Some(msg) = self.last_error.as_ref() {
             ui.colored_label(egui::Color32::RED, msg);
         }
+    }
 
+    /// UI scale, theme and fullscreen controls.
+    fn ui_view_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.separator();
         ui.label("View controls");
 
@@ -299,24 +339,10 @@ impl StvizApp {
                 }
             }
         });
+    }
 
-        ui.separator();
-        ui.label("Loaded dataset");
-
-        let Some(ds) = self.dataset.clone() else {
-            ui.label("No dataset loaded.");
-            return;
-        };
-
-        ui.label(format!("Points: {}", ds.meta.n_points));
-        if let Some(p) = self.dataset_path.as_ref() {
-            ui.label(p.display().to_string());
-        }
-
-        ui.separator();
-        ui.label("View");
-        ui.checkbox(&mut self.show_axes, "Show axes");
-
+    /// Sample grid (spatial) settings.
+    fn ui_sample_grid_section(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
         ui.separator();
         ui.label("Sample grid (spatial)");
         let mut grid_changed = false;
@@ -469,7 +495,10 @@ impl StvizApp {
         if grid_changed {
             self.mark_grid_dirty();
         }
+    }
 
+    /// Color mode selection and the per-mode color controls.
+    fn ui_color_section(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
         ui.separator();
         ui.label("Color");
 
@@ -902,7 +931,10 @@ impl StvizApp {
                 }
             }
         }
+    }
 
+    /// Active filters summary and the gradient legend.
+    fn ui_filters_and_legend(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
         if !self.active_filters.is_empty() {
             ui.separator();
             ui.label("Active filters");
@@ -933,7 +965,10 @@ impl StvizApp {
             ui.label("Legend");
             draw_gradient_legend(ui, &legend.label, legend.min, legend.max);
         }
+    }
 
+    /// Point size, draw cap and draw-order controls.
+    fn ui_rendering_section(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
         ui.separator();
         ui.label("Rendering");
         ui.horizontal(|ui| {
@@ -985,7 +1020,10 @@ impl StvizApp {
 
         ui.checkbox(&mut self.fast_render, "Fast render (square points)");
         ui.checkbox(&mut self.show_stats, "Show stats");
+    }
 
+    /// Screenshot and video export controls and the export log.
+    fn ui_output_section(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         let mut output_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(6));
         if self.exporting_loop {
