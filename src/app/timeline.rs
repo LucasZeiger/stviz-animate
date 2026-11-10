@@ -37,21 +37,20 @@ impl StvizApp {
                 .button("Add key")
                 .on_hover_text("Insert a keyframe after the current segment.")
                 .clicked()
+                && self.space_path.len() >= 2
             {
-                if self.space_path.len() >= 2 {
-                    let space = *self.space_path.last().unwrap_or(&0);
-                    let color = self.color_path.last().cloned().unwrap_or(ColorKey::Current);
-                    let filter = self.filter_path.last().cloned().unwrap_or(None);
-                    self.space_path.push(space);
-                    self.color_path.push(color);
-                    self.filter_path.push(filter);
-                    self.key_times.resize(self.space_path.len(), 0.0);
-                    if self.key_collapsed.len() != self.space_path.len() {
-                        self.key_collapsed.resize(self.space_path.len(), false);
-                    }
-                    self.selected_key_idx = Some(self.space_path.len() - 1);
-                    self.distribute_key_times_evenly();
+                let space = *self.space_path.last().unwrap_or(&0);
+                let color = self.color_path.last().cloned().unwrap_or(ColorKey::Current);
+                let filter = self.filter_path.last().cloned().unwrap_or(None);
+                self.space_path.push(space);
+                self.color_path.push(color);
+                self.filter_path.push(filter);
+                self.key_times.resize(self.space_path.len(), 0.0);
+                if self.key_collapsed.len() != self.space_path.len() {
+                    self.key_collapsed.resize(self.space_path.len(), false);
                 }
+                self.selected_key_idx = Some(self.space_path.len() - 1);
+                self.distribute_key_times_evenly();
             }
             if ui
                 .button("Space evenly")

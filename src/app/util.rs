@@ -219,7 +219,7 @@ pub(super) fn contrast_color(bg: egui::Color32) -> egui::Color32 {
 
 pub(super) fn format_scale_value(v: f32) -> String {
     let av = v.abs();
-    if av > 0.0 && (av < 0.01 || av >= 1000.0) {
+    if av > 0.0 && !(0.01..1000.0).contains(&av) {
         format!("{v:.2e}")
     } else {
         format!("{v:.3}")

@@ -383,17 +383,12 @@ impl StvizApp {
         let (active_from, active_to, _color_from, _color_to, seg_t, _seg_idx) =
             self.current_segment(ds);
         let grid_idx = self.sample_grid_space_idx;
-        let show_labels = if let Some(grid_idx) = grid_idx {
-            if active_from == grid_idx && active_to == grid_idx {
-                true
-            } else if active_from == grid_idx && seg_t <= 0.02 {
-                true
-            } else {
-                active_to == grid_idx && seg_t >= 0.98
-            }
-        } else {
-            false
-        };
+        // Show labels while the grid space is on screen: during a grid-to-grid
+        // segment, or at the very start/end of a segment touching it.
+        let show_labels = grid_idx.is_some_and(|grid_idx| {
+            (active_from == grid_idx && (active_to == grid_idx || seg_t <= 0.02))
+                || (active_to == grid_idx && seg_t >= 0.98)
+        });
         if !show_labels {
             return;
         }
@@ -442,7 +437,7 @@ impl StvizApp {
     }
 
     pub(super) fn viewport_crop_px(rect: egui::Rect, ppp: f32) -> Option<[u32; 4]> {
-        if rect.is_positive() == false {
+        if !rect.is_positive() {
             return None;
         }
         let x0 = (rect.min.x * ppp).floor().max(0.0);

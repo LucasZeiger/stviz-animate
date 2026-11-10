@@ -21,8 +21,7 @@ impl StvizApp {
         self.dataset_id = self.dataset_id.wrapping_add(1);
 
         // default selections
-        let max_idx = ds.meta.spaces.len().saturating_sub(1);
-        let from_idx = find_space_by_name(&ds, "spatial").unwrap_or(0.min(max_idx));
+        let from_idx = find_space_by_name(&ds, "spatial").unwrap_or(0);
         let mut to_idx = find_space_by_name(&ds, "x_umap")
             .or_else(|| find_space_by_name(&ds, "umap"))
             .unwrap_or((ds.meta.spaces.len().saturating_sub(1)).min(1));

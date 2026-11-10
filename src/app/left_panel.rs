@@ -456,7 +456,7 @@ impl StvizApp {
                         if let Ok((_name, _labels, categories, _pal)) = ds.obs_categorical(obs_idx)
                         {
                             if categories.len() <= MAX_GRID_CATEGORIES {
-                                self.ensure_sample_grid_custom_labels(obs_idx, &categories);
+                                self.ensure_sample_grid_custom_labels(obs_idx, categories);
                                 if ui.button("Clear custom labels").clicked() {
                                     self.sample_grid_custom_labels = categories.to_vec();
                                 }
@@ -557,7 +557,7 @@ impl StvizApp {
                             }
                         });
                     if changed {
-                        self.load_filter_state(&ds);
+                        self.load_filter_state(ds);
                         self.filter_popup_open = false;
                     }
 
@@ -944,7 +944,7 @@ impl StvizApp {
                 .max_height(90.0)
                 .show(ui, |ui| {
                     for obs_idx in active {
-                        ui.label(obs_name(&ds, obs_idx));
+                        ui.label(obs_name(ds, obs_idx));
                     }
                 });
             if ui
@@ -952,7 +952,7 @@ impl StvizApp {
                 .on_hover_text("Disable all active filters and reset category masks.")
                 .clicked()
             {
-                self.clear_all_filters(&ds);
+                self.clear_all_filters(ds);
             }
         }
 
@@ -1010,7 +1010,7 @@ impl StvizApp {
         if ui.button("Shuffle draw order").clicked() {
             if let Some(ds) = self.dataset.as_ref() {
                 if self.base_indices.is_empty() {
-                    self.base_indices = (0..ds.meta.n_points as u32).collect();
+                    self.base_indices = (0..ds.meta.n_points).collect();
                 }
                 let mut rng = rand::thread_rng();
                 self.base_indices.shuffle(&mut rng);

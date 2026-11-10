@@ -632,10 +632,8 @@ impl StvizApp {
                     let mut best: Option<(usize, bool, f32)> = None;
                     for (idx, is_output, node_pos) in &node_hits {
                         let dist = node_pos.distance(pos);
-                        if dist <= 12.0 {
-                            if best.as_ref().map(|b| dist < b.2).unwrap_or(true) {
-                                best = Some((*idx, *is_output, dist));
-                            }
+                        if dist <= 12.0 && best.as_ref().map(|b| dist < b.2).unwrap_or(true) {
+                            best = Some((*idx, *is_output, dist));
                         }
                     }
                     if let Some((target_idx, target_is_output, _)) = best {

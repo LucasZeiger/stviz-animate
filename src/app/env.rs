@@ -55,7 +55,7 @@ Then add that path to your system environment variables (PATH).";
         let exe = lines.next().unwrap_or("").trim().to_string();
         let version = lines.next().unwrap_or("").trim().to_string();
         if !version.is_empty() {
-            let mut parts = version.split(|c| c == '.' || c == ' ');
+            let mut parts = version.split(['.', ' ']);
             let major = parts
                 .next()
                 .and_then(|v| v.parse::<u32>().ok())
@@ -428,11 +428,11 @@ Then add that path to your system environment variables (PATH).";
             if let Some(name) = env_root.file_name().and_then(|s| s.to_str()) {
                 cmd.env("CONDA_DEFAULT_ENV", name);
             }
-            cmd.env("CONDA_PREFIX", &env_root);
+            cmd.env("CONDA_PREFIX", env_root);
             cmd.env("CONDA_SHLVL", "1");
             cmd.env("CONDA_DLL_SEARCH_MODIFICATION_ENABLE", "1");
         } else if env_root.join("pyvenv.cfg").exists() {
-            cmd.env("VIRTUAL_ENV", &env_root);
+            cmd.env("VIRTUAL_ENV", env_root);
         }
 
         let path_sep = if cfg!(windows) { ";" } else { ":" };

@@ -279,7 +279,7 @@ impl StvizApp {
         let tile_w = max_w * pad;
         let tile_h = max_h * pad;
         let cols = (n_sel as f32).sqrt().ceil() as usize;
-        let rows = (n_sel + cols - 1) / cols;
+        let rows = n_sel.div_ceil(cols);
         let origin_x = -((cols as f32 - 1.0) * 0.5);
         let origin_y = -((rows as f32 - 1.0) * 0.5);
 
@@ -483,7 +483,7 @@ impl StvizApp {
         let tile_w = max_w * pad;
         let tile_h = max_h * pad;
         let cols = (n_sel as f32).sqrt().ceil() as usize;
-        let rows = (n_sel + cols - 1) / cols;
+        let rows = n_sel.div_ceil(cols);
         let origin_x = -((cols as f32 - 1.0) * 0.5);
         let origin_y = -((rows as f32 - 1.0) * 0.5);
 
