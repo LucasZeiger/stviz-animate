@@ -17,11 +17,7 @@ use std::{
 };
 
 impl StvizApp {
-    fn run_python_cv2_export(
-        &mut self,
-        frames_dir: &Path,
-        out_path: &Path,
-    ) -> Result<(), String> {
+    fn run_python_cv2_export(&mut self, frames_dir: &Path, out_path: &Path) -> Result<(), String> {
         let script = self.project_dir.join("python").join("export_video_cv2.py");
         if !script.exists() {
             return Err(format!("OpenCV exporter not found: {}", script.display()));
@@ -1114,12 +1110,7 @@ fn save_color_image_png(
     Ok(())
 }
 
-fn save_rgba_png(
-    path: &Path,
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> anyhow::Result<()> {
+fn save_rgba_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::Result<()> {
     use image::ImageEncoder;
 
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();

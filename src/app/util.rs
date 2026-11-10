@@ -1,6 +1,6 @@
 //! Small free-standing helpers shared across the app modules.
 
-use super::{EaseMode, PlaybackMode};
+use super::{EaseMode, PlaybackMode, MAX_FILTER_CATEGORIES};
 use crate::data::{Dataset, ObsMeta};
 use eframe::egui;
 
@@ -84,6 +84,35 @@ pub(super) fn chrono_like_timestamp() -> String {
         .unwrap_or_default()
         .as_millis();
     format!("{ms}")
+}
+
+/// Observation columns that can be offered in a picker, as `(obs index, name)`.
+#[derive(Default)]
+pub(super) struct ObsOptions {
+    pub(super) categorical: Vec<(usize, String)>,
+    /// Categorical columns small enough to filter on (`<= MAX_FILTER_CATEGORIES`).
+    pub(super) filterable: Vec<(usize, String)>,
+    pub(super) continuous: Vec<(usize, String)>,
+}
+
+impl ObsOptions {
+    pub(super) fn for_dataset(ds: &Dataset) -> Self {
+        let mut out = Self::default();
+        for (i, o) in ds.meta.obs.iter().enumerate() {
+            match o {
+                ObsMeta::Categorical {
+                    name, categories, ..
+                } => {
+                    out.categorical.push((i, name.clone()));
+                    if categories.len() <= MAX_FILTER_CATEGORIES {
+                        out.filterable.push((i, name.clone()));
+                    }
+                }
+                ObsMeta::Continuous { name, .. } => out.continuous.push((i, name.clone())),
+            }
+        }
+        out
+    }
 }
 
 #[cfg(test)]

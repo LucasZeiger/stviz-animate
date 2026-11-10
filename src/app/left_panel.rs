@@ -23,7 +23,7 @@ impl StvizApp {
         self.ui_data_sources(ui, ctx);
         self.ui_workspace_section(ui);
 
-        self.ui_view_controls(ui, ctx);
+        self.ui_appearance_controls(ui, ctx);
 
         ui.separator();
         ui.label("Loaded dataset");
@@ -33,15 +33,7 @@ impl StvizApp {
             return;
         };
 
-        ui.label(format!("Points: {}", ds.meta.n_points));
-        if let Some(p) = self.dataset_path.as_ref() {
-            ui.label(p.display().to_string());
-        }
-
-        ui.separator();
-        ui.label("View");
-        ui.checkbox(&mut self.show_axes, "Show axes");
-
+        self.ui_dataset_info(ui, &ds);
         self.ui_sample_grid_section(ui, &ds);
         self.ui_color_section(ui, &ds);
         self.ui_filters_and_legend(ui, &ds);
@@ -255,7 +247,7 @@ impl StvizApp {
     }
 
     /// UI scale, theme and fullscreen controls.
-    fn ui_view_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+    fn ui_appearance_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.separator();
         ui.label("View controls");
 
@@ -343,8 +335,20 @@ impl StvizApp {
         });
     }
 
+    /// Point count and path of the loaded dataset, plus the axes toggle.
+    fn ui_dataset_info(&mut self, ui: &mut egui::Ui, ds: &Dataset) {
+        ui.label(format!("Points: {}", ds.meta.n_points));
+        if let Some(p) = self.dataset_path.as_ref() {
+            ui.label(p.display().to_string());
+        }
+
+        ui.separator();
+        ui.label("View");
+        ui.checkbox(&mut self.show_axes, "Show axes");
+    }
+
     /// Sample grid (spatial) settings.
-    fn ui_sample_grid_section(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
+    fn ui_sample_grid_section(&mut self, ui: &mut egui::Ui, ds: &Dataset) {
         ui.separator();
         ui.label("Sample grid (spatial)");
         let mut grid_changed = false;
@@ -500,7 +504,7 @@ impl StvizApp {
     }
 
     /// Color mode selection and the per-mode color controls.
-    fn ui_color_section(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
+    fn ui_color_section(&mut self, ui: &mut egui::Ui, ds: &Dataset) {
         ui.separator();
         ui.label("Color");
 
@@ -936,7 +940,7 @@ impl StvizApp {
     }
 
     /// Active filters summary and the gradient legend.
-    fn ui_filters_and_legend(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
+    fn ui_filters_and_legend(&mut self, ui: &mut egui::Ui, ds: &Dataset) {
         if !self.active_filters.is_empty() {
             ui.separator();
             ui.label("Active filters");
@@ -970,7 +974,7 @@ impl StvizApp {
     }
 
     /// Point size, draw cap and draw-order controls.
-    fn ui_rendering_section(&mut self, ui: &mut egui::Ui, ds: &Arc<Dataset>) {
+    fn ui_rendering_section(&mut self, ui: &mut egui::Ui, ds: &Dataset) {
         ui.separator();
         ui.label("Rendering");
         ui.horizontal(|ui| {

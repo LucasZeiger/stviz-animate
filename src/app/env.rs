@@ -274,12 +274,7 @@ Then add that path to your system environment variables (PATH).";
         self.ffmpeg_path = path;
     }
 
-    fn run_ffmpeg_install_attempt(
-        &mut self,
-        label: &str,
-        program: &str,
-        args: &[&str],
-    ) -> bool {
+    fn run_ffmpeg_install_attempt(&mut self, label: &str, program: &str, args: &[&str]) -> bool {
         self.append_export_log(&format!(
             "Trying ffmpeg installer ({label}): {} {}",
             program,

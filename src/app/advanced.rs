@@ -1,10 +1,10 @@
 //! The advanced (node-based) timeline editor.
 
 use super::{
-    AdvancedCard, AdvancedCardFilter, AdvancedConnection, AdvancedConnectionDrag, ColorKey,
-    KeyColorKind, KeyframeFilter, StvizApp, MAX_FILTER_CATEGORIES,
+    util::ObsOptions, AdvancedCard, AdvancedCardFilter, AdvancedConnection, AdvancedConnectionDrag,
+    ColorKey, KeyColorKind, KeyframeFilter, StvizApp, MAX_FILTER_CATEGORIES,
 };
-use crate::data::{Dataset, ObsMeta};
+use crate::data::Dataset;
 use eframe::egui;
 
 impl StvizApp {
@@ -165,49 +165,13 @@ impl StvizApp {
         ui.separator();
 
         let ds_opt = self.dataset.clone();
-        let categorical_opts: Vec<(usize, String)> = ds_opt
+        let ObsOptions {
+            categorical: categorical_opts,
+            filterable: filterable_opts,
+            continuous: continuous_opts,
+        } = ds_opt
             .as_ref()
-            .map(|ds| {
-                ds.meta
-                    .obs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, o)| match o {
-                        ObsMeta::Categorical { name, .. } => Some((i, name.clone())),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let filterable_opts: Vec<(usize, String)> = ds_opt
-            .as_ref()
-            .map(|ds| {
-                ds.meta
-                    .obs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, o)| match o {
-                        ObsMeta::Categorical {
-                            name, categories, ..
-                        } if categories.len() <= MAX_FILTER_CATEGORIES => Some((i, name.clone())),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let continuous_opts: Vec<(usize, String)> = ds_opt
-            .as_ref()
-            .map(|ds| {
-                ds.meta
-                    .obs
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(i, o)| match o {
-                        ObsMeta::Continuous { name, .. } => Some((i, name.clone())),
-                        _ => None,
-                    })
-                    .collect()
-            })
+            .map(|ds| ObsOptions::for_dataset(ds))
             .unwrap_or_default();
 
         let default_card_size = egui::vec2(220.0, 150.0);

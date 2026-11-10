@@ -100,11 +100,7 @@ impl StvizApp {
         self.load_dataset(&path)
     }
 
-    fn workspace_filter(
-        ds: &Dataset,
-        obs_idx: usize,
-        enabled: &[bool],
-    ) -> Option<WorkspaceFilter> {
+    fn workspace_filter(ds: &Dataset, obs_idx: usize, enabled: &[bool]) -> Option<WorkspaceFilter> {
         let (name, _labels, categories, _pal) = ds.obs_categorical(obs_idx).ok()?;
         Some(WorkspaceFilter {
             field: name.to_string(),

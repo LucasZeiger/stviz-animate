@@ -1,10 +1,10 @@
 //! The bottom timeline bar.
 
 use super::{
-    util::obs_name, ColorKey, EaseMode, KeyColorKind, KeyframeFilter, PlaybackMode, StvizApp,
-    MAX_FILTER_CATEGORIES,
+    util::obs_name, util::ObsOptions, ColorKey, EaseMode, KeyColorKind, KeyframeFilter,
+    PlaybackMode, StvizApp, MAX_FILTER_CATEGORIES,
 };
-use crate::data::{Dataset, ObsMeta};
+use crate::data::Dataset;
 use eframe::egui;
 use std::sync::Arc;
 
@@ -30,6 +30,15 @@ impl StvizApp {
         self.ui_transport_controls(ui, ctx, ds_ref);
         self.ui_timeline_scrubber(ui);
 
+        self.ui_keyframe_list(ui, ctx, ds_ref);
+
+        if self.playing {
+            ctx.request_repaint_after(self.main_view_frame_interval());
+        }
+    }
+
+    /// The "Keyframes" row and the horizontally scrolling keyframe cards.
+    fn ui_keyframe_list(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, ds_ref: &Dataset) {
         ui.separator();
         ui.horizontal(|ui| {
             ui.label("Keyframes");
@@ -106,38 +115,11 @@ impl StvizApp {
             }
         });
 
-        let categorical_opts: Vec<(usize, String)> = ds_ref
-            .meta
-            .obs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, o)| match o {
-                ObsMeta::Categorical { name, .. } => Some((i, name.clone())),
-                _ => None,
-            })
-            .collect();
-        let filterable_opts: Vec<(usize, String)> = ds_ref
-            .meta
-            .obs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, o)| match o {
-                ObsMeta::Categorical {
-                    name, categories, ..
-                } if categories.len() <= MAX_FILTER_CATEGORIES => Some((i, name.clone())),
-                _ => None,
-            })
-            .collect();
-        let continuous_opts: Vec<(usize, String)> = ds_ref
-            .meta
-            .obs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, o)| match o {
-                ObsMeta::Continuous { name, .. } => Some((i, name.clone())),
-                _ => None,
-            })
-            .collect();
+        let ObsOptions {
+            categorical: categorical_opts,
+            filterable: filterable_opts,
+            continuous: continuous_opts,
+        } = ObsOptions::for_dataset(ds_ref);
         let key_count = self.space_path.len();
         let mut drag_stop_idx: Option<usize> = None;
         let mut card_rects: Vec<(usize, egui::Rect)> = Vec::new();
@@ -639,10 +621,6 @@ impl StvizApp {
         self.ensure_filter_path_len(self.space_path.len());
         self.from_space = *self.space_path.first().unwrap_or(&self.from_space);
         self.to_space = *self.space_path.last().unwrap_or(&self.to_space);
-
-        if self.playing {
-            ctx.request_repaint_after(self.main_view_frame_interval());
-        }
     }
 
     /// Transport (play/stop/step), playback mode, speed, easing and view-reset controls.
