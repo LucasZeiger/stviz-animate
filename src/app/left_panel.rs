@@ -1,11 +1,13 @@
 //! The left-hand settings panel.
 
+use super::util::{color32_from_packed, format_scale_value};
 use super::{
-    util::{chrono_like_timestamp, draw_gradient_legend, obs_name, render_filter_rows},
+    util::{chrono_like_timestamp, obs_name},
     CategoricalPalette, CategoryPaletteCache, ColorMode, ExportEncodingSpeed, ExportQuality,
     ExportVideoQuality, LegendRange, SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
-    MAX_GRID_CATEGORIES, SCREENSHOT_RESOLUTION,
+    MAX_GRID_CATEGORIES,
 };
+use crate::color::pack_rgba8;
 use crate::{
     color::gradient_map,
     data::{Dataset, ObsMeta},
@@ -1255,3 +1257,62 @@ impl StvizApp {
         });
     }
 }
+
+fn render_filter_rows(
+    ui: &mut egui::Ui,
+    range: std::ops::Range<usize>,
+    categories: &[String],
+    palette_slice: Option<&[u32]>,
+    enabled_categories: &mut [bool],
+    overrides: &mut [Option<u32>],
+    filter_changed: &mut bool,
+    colors_changed: &mut bool,
+) {
+    for i in range {
+        let c = &categories[i];
+        let mut color = palette_slice
+            .and_then(|pal| pal.get(i).copied())
+            .unwrap_or(pack_rgba8(200, 200, 200, 255));
+        if let Some(override_color) = overrides.get(i).and_then(|c| *c) {
+            color = override_color;
+        }
+        let mut color = color32_from_packed(color);
+        ui.horizontal(|ui| {
+            if ui.checkbox(&mut enabled_categories[i], "").changed() {
+                *filter_changed = true;
+            }
+            if ui.color_edit_button_srgba(&mut color).changed() {
+                if i < overrides.len() {
+                    overrides[i] = Some(pack_rgba8(color.r(), color.g(), color.b(), color.a()));
+                }
+                *colors_changed = true;
+            }
+            ui.label(c);
+        });
+    }
+}
+
+fn draw_gradient_legend(ui: &mut egui::Ui, label: &str, vmin: f32, vmax: f32) {
+    ui.label(label);
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(180.0, 14.0), egui::Sense::hover());
+    let steps = 32;
+    let seg_w = rect.width() / steps as f32;
+    for i in 0..steps {
+        let t = i as f32 / (steps - 1) as f32;
+        let c = colorous::VIRIDIS.eval_continuous(t as f64);
+        let color = egui::Color32::from_rgb(c.r, c.g, c.b);
+        let x0 = rect.left() + seg_w * i as f32;
+        let seg = egui::Rect::from_min_size(
+            egui::pos2(x0, rect.top()),
+            egui::vec2(seg_w + 1.0, rect.height()),
+        );
+        ui.painter().rect_filled(seg, 0.0, color);
+    }
+    ui.label(format!(
+        "Range: {} .. {}",
+        format_scale_value(vmin),
+        format_scale_value(vmax)
+    ));
+}
+
+const SCREENSHOT_RESOLUTION: [u32; 2] = [3840, 2160];

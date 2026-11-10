@@ -1,7 +1,6 @@
 //! Dataset loading, color/filter recomputation and draw-index selection.
 
 use super::{
-    util::{find_obs_by_name, find_space_by_name},
     AdvancedCardFilter, ColorKey, ColorMode, LegendRange, StvizApp, MAX_FILTER_CATEGORIES,
 };
 use crate::{
@@ -324,7 +323,7 @@ impl StvizApp {
         Ok(())
     }
 
-    pub(super) fn recompute_draw_indices(&mut self) -> anyhow::Result<()> {
+    fn recompute_draw_indices(&mut self) -> anyhow::Result<()> {
         let Some(ds) = self.dataset.as_ref() else {
             return Ok(());
         };
@@ -484,7 +483,7 @@ impl StvizApp {
         hash
     }
 
-    pub(super) fn advanced_filter_indices(
+    fn advanced_filter_indices(
         ds: &Dataset,
         filter: &mut AdvancedCardFilter,
         max_draw: usize,
@@ -544,4 +543,64 @@ impl StvizApp {
         let filter = card.filter.as_mut()?;
         Self::advanced_filter_indices(ds, filter, max_draw, dataset_id)
     }
+
+    pub(super) fn apply_downsample(&mut self) {
+        let max_draw = self.max_draw_points;
+        if max_draw == 0 || self.base_indices.len() <= max_draw {
+            self.draw_indices = Arc::new(self.base_indices.clone());
+            self.indices_id = self.indices_id.wrapping_add(1);
+            return;
+        }
+
+        let step = (self.base_indices.len() as f32 / max_draw as f32)
+            .ceil()
+            .max(1.0) as usize;
+        let mut out = Vec::with_capacity(max_draw);
+        for (i, idx) in self.base_indices.iter().enumerate() {
+            if i % step == 0 {
+                out.push(*idx);
+                if out.len() >= max_draw {
+                    break;
+                }
+            }
+        }
+        self.draw_indices = Arc::new(out);
+        self.indices_id = self.indices_id.wrapping_add(1);
+    }
+
+    pub(super) fn load_filter_state(&mut self, ds: &Dataset) {
+        if let Ok((_name, _labels, categories, _pal)) = ds.obs_categorical(self.active_obs_idx) {
+            if categories.len() > MAX_FILTER_CATEGORIES {
+                self.enabled_categories.clear();
+                return;
+            }
+            if let Some(saved) = self.category_state.get(&self.active_obs_idx) {
+                if saved.len() == categories.len() {
+                    self.enabled_categories = saved.clone();
+                    return;
+                }
+            }
+            self.enabled_categories = vec![true; categories.len()];
+        }
+    }
+}
+
+fn find_obs_by_name(ds: &Dataset, needle: &str) -> Option<usize> {
+    let needle = needle.to_ascii_lowercase();
+    ds.meta.obs.iter().enumerate().find_map(|(i, o)| match o {
+        ObsMeta::Categorical { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
+        ObsMeta::Continuous { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
+        _ => None,
+    })
+}
+
+fn find_space_by_name(ds: &Dataset, needle: &str) -> Option<usize> {
+    let needle = needle.to_ascii_lowercase();
+    ds.meta.spaces.iter().enumerate().find_map(|(i, s)| {
+        if s.name.to_ascii_lowercase().contains(&needle) {
+            Some(i)
+        } else {
+            None
+        }
+    })
 }

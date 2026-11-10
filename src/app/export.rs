@@ -1,8 +1,8 @@
 //! Video/frame export and screenshots.
 
 use super::{
-    util::{apply_ease, chrono_like_timestamp, obs_name, save_color_image_png, save_rgba_png},
-    ColorKey, DirectVideoExport, ExportQuality, ExportVideoQuality, ScreenshotRequest, StvizApp,
+    util::{apply_ease, chrono_like_timestamp, obs_name},
+    ColorKey, DirectVideoExport, ExportQuality, ExportVideoQuality, StvizApp,
 };
 use crate::{
     camera::Camera2D,
@@ -17,7 +17,7 @@ use std::{
 };
 
 impl StvizApp {
-    pub(super) fn run_python_cv2_export(
+    fn run_python_cv2_export(
         &mut self,
         frames_dir: &Path,
         out_path: &Path,
@@ -153,7 +153,7 @@ impl StvizApp {
         Ok(())
     }
 
-    pub(super) fn try_start_direct_video_export(&mut self) -> Result<bool, String> {
+    fn try_start_direct_video_export(&mut self) -> Result<bool, String> {
         if !self.export_run_ffmpeg || self.export_keep_frames {
             return Ok(false);
         }
@@ -591,7 +591,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn finalize_export_output(
+    fn finalize_export_output(
         &mut self,
         temp_path: &Path,
         final_path: &Path,
@@ -748,7 +748,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn export_resolution_for_quality(&self) -> Option<[u32; 2]> {
+    fn export_resolution_for_quality(&self) -> Option<[u32; 2]> {
         match self.export_quality {
             ExportQuality::Current => None,
             ExportQuality::FullHd => Some([1920, 1080]),
@@ -1063,4 +1063,79 @@ impl StvizApp {
             .map_err(|e| format!("Export PNG failed: {e:#}"))?;
         Ok(())
     }
+}
+
+fn save_color_image_png(
+    img: &egui::ColorImage,
+    path: &Path,
+    crop_px: Option<[u32; 4]>,
+) -> anyhow::Result<()> {
+    use image::ImageEncoder;
+
+    let w = img.size[0] as u32;
+    let h = img.size[1] as u32;
+
+    let (x0, y0, cw, ch) = if let Some(crop) = crop_px {
+        let mut x = crop[0].min(w);
+        let mut y = crop[1].min(h);
+        let mut cw = crop[2].min(w.saturating_sub(x));
+        let mut ch = crop[3].min(h.saturating_sub(y));
+        if cw == 0 || ch == 0 {
+            x = 0;
+            y = 0;
+            cw = w;
+            ch = h;
+        }
+        (x, y, cw, ch)
+    } else {
+        (0, 0, w, h)
+    };
+
+    let mut rgba = Vec::with_capacity((cw * ch * 4) as usize);
+    for row in 0..ch {
+        let base = (y0 + row) as usize * w as usize + x0 as usize;
+        for col in 0..cw as usize {
+            let p = img.pixels[base + col];
+            rgba.push(p.r());
+            rgba.push(p.g());
+            rgba.push(p.b());
+            rgba.push(p.a());
+        }
+    }
+
+    std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();
+
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        std::fs::File::create(path)?,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    encoder.write_image(&rgba, cw, ch, image::ColorType::Rgba8.into())?;
+    Ok(())
+}
+
+fn save_rgba_png(
+    path: &Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> anyhow::Result<()> {
+    use image::ImageEncoder;
+
+    std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();
+    let file = std::fs::File::create(path)?;
+    let encoder = image::codecs::png::PngEncoder::new_with_quality(
+        file,
+        image::codecs::png::CompressionType::Best,
+        image::codecs::png::FilterType::Adaptive,
+    );
+    encoder.write_image(rgba, width, height, image::ExtendedColorType::Rgba8)?;
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct ScreenshotRequest {
+    path: PathBuf,
+    crop_px: Option<[u32; 4]>,
+    is_export_frame: bool,
 }

@@ -1,13 +1,10 @@
 use crate::{
     camera::Camera2D,
-    color::{categorical_palette, categorical_palette_named},
     data::Dataset,
     render::{PointCloudGpu, SharedRender},
 };
 use eframe::egui;
 use egui_wgpu::wgpu;
-#[cfg(windows)]
-use raw_window_handle::HasWindowHandle;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -26,6 +23,7 @@ mod keyframes;
 mod layout;
 mod left_panel;
 mod render_callback;
+mod style;
 mod timeline;
 mod util;
 mod viewport;
@@ -33,9 +31,6 @@ mod workspace;
 
 const MAX_FILTER_CATEGORIES: usize = 5000;
 const MAX_GRID_CATEGORIES: usize = 512;
-const ADVANCED_VIEW_FPS_CAP_HZ: f32 = 60.0;
-const MIN_PYTHON_VERSION: (u32, u32) = (3, 8);
-const SCREENSHOT_RESOLUTION: [u32; 2] = [3840, 2160];
 const APP_DATA_DIR_NAME: &str = "stviz-animate";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -399,13 +394,6 @@ struct AdvancedConnectionDrag {
     start_pos: egui::Pos2,
 }
 
-#[derive(Clone, Debug)]
-struct ScreenshotRequest {
-    path: PathBuf,
-    crop_px: Option<[u32; 4]>,
-    is_export_frame: bool,
-}
-
 struct ConvertResult {
     msg: String,
     output: PathBuf,
@@ -628,142 +616,6 @@ impl StvizApp {
                 .send_viewport_cmd(egui::ViewportCommand::Maximized(true));
         }
         app
-    }
-
-    fn apply_fullscreen(&self, ctx: &egui::Context) {
-        if Self::is_wsl() {
-            return;
-        }
-        let enable = self.fullscreen;
-        let is_wayland = std::env::var("XDG_SESSION_TYPE")
-            .map(|v| v.eq_ignore_ascii_case("wayland"))
-            .unwrap_or(false);
-        if is_wayland {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-            if !enable {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
-            }
-        } else {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enable));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
-            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!enable));
-        }
-    }
-
-    fn is_wsl() -> bool {
-        std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some()
-    }
-
-    fn update_main_view_refresh(&mut self, ctx: &egui::Context, _frame: &eframe::Frame) {
-        let now = ctx.input(|i| i.time);
-        if now - self.main_view_last_refresh_query < 2.0 {
-            return;
-        }
-        self.main_view_last_refresh_query = now;
-        let mut refresh_hz = self.main_view_refresh_hz;
-        #[cfg(windows)]
-        {
-            if let Some(hz) = Self::query_refresh_hz_windows(_frame) {
-                refresh_hz = hz;
-            }
-        }
-        if refresh_hz <= 1.0 {
-            refresh_hz = 60.0;
-        }
-        self.main_view_refresh_hz = refresh_hz;
-        self.main_view_fps_cap_hz = (refresh_hz - 1.0).max(30.0);
-    }
-
-    #[cfg(windows)]
-    fn query_refresh_hz_windows(frame: &eframe::Frame) -> Option<f32> {
-        use raw_window_handle::RawWindowHandle;
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, VREFRESH};
-
-        let handle = frame.window_handle().ok()?;
-        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
-            return None;
-        };
-        let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
-        unsafe {
-            let hdc = GetDC(hwnd);
-            if hdc.is_invalid() {
-                return None;
-            }
-            let refresh = GetDeviceCaps(hdc, VREFRESH) as i32;
-            ReleaseDC(hwnd, hdc);
-            if refresh > 1 {
-                Some(refresh as f32)
-            } else {
-                None
-            }
-        }
-    }
-
-    fn categorical_palette_label(palette: CategoricalPalette) -> &'static str {
-        match palette {
-            CategoricalPalette::Tableau10 => "Tableau10",
-            CategoricalPalette::Tab10 => "Tab10",
-            CategoricalPalette::Tab20 => "Tab20",
-            CategoricalPalette::Category10 => "Category10",
-            CategoricalPalette::Set1 => "Set1",
-            CategoricalPalette::Set2 => "Set2",
-            CategoricalPalette::Set3 => "Set3",
-            CategoricalPalette::Dark2 => "Dark2",
-            CategoricalPalette::Accent => "Accent",
-            CategoricalPalette::Paired => "Paired",
-            CategoricalPalette::Pastel1 => "Pastel1",
-            CategoricalPalette::Pastel2 => "Pastel2",
-            CategoricalPalette::Turbo => "Turbo",
-            CategoricalPalette::Dataset => "Dataset",
-        }
-    }
-
-    fn categorical_palette_name(palette: CategoricalPalette) -> &'static str {
-        match palette {
-            CategoricalPalette::Tableau10 => "tableau10",
-            CategoricalPalette::Tab10 => "tab10",
-            CategoricalPalette::Tab20 => "tab20",
-            CategoricalPalette::Category10 => "category10",
-            CategoricalPalette::Set1 => "set1",
-            CategoricalPalette::Set2 => "set2",
-            CategoricalPalette::Set3 => "set3",
-            CategoricalPalette::Dark2 => "dark2",
-            CategoricalPalette::Accent => "accent",
-            CategoricalPalette::Paired => "paired",
-            CategoricalPalette::Pastel1 => "pastel1",
-            CategoricalPalette::Pastel2 => "pastel2",
-            CategoricalPalette::Turbo => "turbo",
-            CategoricalPalette::Dataset => "dataset",
-        }
-    }
-
-    fn categorical_palette_for(
-        &self,
-        obs_idx: usize,
-        categories_len: usize,
-        pal_opt: Option<&[u32]>,
-    ) -> Vec<u32> {
-        let base = match self.categorical_palette {
-            CategoricalPalette::Dataset => pal_opt
-                .map(|p| p.to_vec())
-                .unwrap_or_else(|| categorical_palette_named("tableau10", categories_len)),
-            CategoricalPalette::Turbo => categorical_palette(categories_len),
-            other => {
-                categorical_palette_named(Self::categorical_palette_name(other), categories_len)
-            }
-        };
-        let mut out = base;
-        if let Some(overrides) = self.category_overrides.get(&obs_idx) {
-            for (i, override_color) in overrides.iter().enumerate() {
-                if let Some(color) = override_color {
-                    if i < out.len() {
-                        out[i] = *color;
-                    }
-                }
-            }
-        }
-        out
     }
 }
 

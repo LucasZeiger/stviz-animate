@@ -81,7 +81,7 @@ impl StvizApp {
         self.start_convert();
     }
 
-    pub(super) fn clamp_mock_cells(&mut self) -> u32 {
+    fn clamp_mock_cells(&mut self) -> u32 {
         let clamped = self.mock_cells.clamp(10_000, 10_000_000);
         if clamped != self.mock_cells {
             self.mock_cells = clamped;
@@ -89,7 +89,7 @@ impl StvizApp {
         clamped
     }
 
-    pub(super) fn default_mock_paths(&self, cells: u32) -> (PathBuf, PathBuf) {
+    fn default_mock_paths(&self, cells: u32) -> (PathBuf, PathBuf) {
         let _ = std::fs::create_dir_all(&self.output_dir);
         let ts = chrono_like_timestamp();
         let h5ad = self
@@ -119,7 +119,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn cleanup_previous_mock(&mut self) {
+    fn cleanup_previous_mock(&mut self) {
         if let Some(path) = self.mock_last_h5ad.as_ref() {
             if Self::path_within_root(&self.output_dir, path) {
                 let _ = std::fs::remove_file(path);
@@ -426,7 +426,7 @@ impl StvizApp {
         }));
     }
 
-    pub(super) fn start_convert(&mut self) {
+    fn start_convert(&mut self) {
         if self.convert_running {
             return;
         }

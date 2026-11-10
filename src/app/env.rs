@@ -1,6 +1,6 @@
 //! Locating Python, ffmpeg and the app/project directories.
 
-use super::{util::chrono_like_timestamp, StvizApp, APP_DATA_DIR_NAME, MIN_PYTHON_VERSION};
+use super::{util::chrono_like_timestamp, StvizApp, APP_DATA_DIR_NAME};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -35,7 +35,7 @@ Then add that path to your system environment variables (PATH).";
         }
     }
 
-    pub(super) fn check_python_cmd(cmd: &str) -> Result<(String, String), String> {
+    fn check_python_cmd(cmd: &str) -> Result<(String, String), String> {
         let env_root = Self::python_env_root(cmd);
         let mut exe_cmd = Command::new(cmd);
         exe_cmd
@@ -76,7 +76,7 @@ Then add that path to your system environment variables (PATH).";
         Ok((cmd.to_string(), exe_label))
     }
 
-    pub(super) fn python_from_env() -> Option<String> {
+    fn python_from_env() -> Option<String> {
         let env_prefix =
             std::env::var_os("VIRTUAL_ENV").or_else(|| std::env::var_os("CONDA_PREFIX"))?;
         let base = PathBuf::from(env_prefix);
@@ -209,7 +209,7 @@ Then add that path to your system environment variables (PATH).";
         ))
     }
 
-    pub(super) fn canonicalize_for_guard(path: &Path) -> Option<PathBuf> {
+    fn canonicalize_for_guard(path: &Path) -> Option<PathBuf> {
         if path.exists() {
             return std::fs::canonicalize(path).ok();
         }
@@ -274,7 +274,7 @@ Then add that path to your system environment variables (PATH).";
         self.ffmpeg_path = path;
     }
 
-    pub(super) fn run_ffmpeg_install_attempt(
+    fn run_ffmpeg_install_attempt(
         &mut self,
         label: &str,
         program: &str,
@@ -490,4 +490,10 @@ Then add that path to your system environment variables (PATH).";
             venv_dir.join("bin").join("python")
         }
     }
+
+    pub(super) fn is_wsl() -> bool {
+        std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some()
+    }
 }
+
+const MIN_PYTHON_VERSION: (u32, u32) = (3, 8);

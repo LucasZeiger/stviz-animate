@@ -1,13 +1,11 @@
 //! The advanced (node-based) timeline editor.
 
 use super::{
-    util::constrain_card_pos, AdvancedCard, AdvancedCardFilter, AdvancedConnection,
-    AdvancedConnectionDrag, ColorKey, KeyColorKind, KeyframeFilter, StvizApp,
-    ADVANCED_VIEW_FPS_CAP_HZ, MAX_FILTER_CATEGORIES,
+    AdvancedCard, AdvancedCardFilter, AdvancedConnection, AdvancedConnectionDrag, ColorKey,
+    KeyColorKind, KeyframeFilter, StvizApp, MAX_FILTER_CATEGORIES,
 };
 use crate::data::{Dataset, ObsMeta};
 use eframe::egui;
-use std::sync::Arc;
 
 impl StvizApp {
     pub(super) fn ui_advanced_timeline(&mut self, ctx: &egui::Context) {
@@ -97,7 +95,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn advanced_timeline_contents(
+    fn advanced_timeline_contents(
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
@@ -918,7 +916,7 @@ impl StvizApp {
         self.advanced_marquee_start = marquee_start;
     }
 
-    pub(super) fn add_advanced_card_at(
+    fn add_advanced_card_at(
         &mut self,
         canvas_rect: egui::Rect,
         inspector_rect: egui::Rect,
@@ -962,7 +960,7 @@ impl StvizApp {
         self.resolve_card_collisions(idx, canvas_rect, inspector_rect);
     }
 
-    pub(super) fn resolve_card_collisions(
+    fn resolve_card_collisions(
         &mut self,
         idx: usize,
         canvas_rect: egui::Rect,
@@ -1012,47 +1010,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn apply_downsample(&mut self) {
-        let max_draw = self.max_draw_points;
-        if max_draw == 0 || self.base_indices.len() <= max_draw {
-            self.draw_indices = Arc::new(self.base_indices.clone());
-            self.indices_id = self.indices_id.wrapping_add(1);
-            return;
-        }
-
-        let step = (self.base_indices.len() as f32 / max_draw as f32)
-            .ceil()
-            .max(1.0) as usize;
-        let mut out = Vec::with_capacity(max_draw);
-        for (i, idx) in self.base_indices.iter().enumerate() {
-            if i % step == 0 {
-                out.push(*idx);
-                if out.len() >= max_draw {
-                    break;
-                }
-            }
-        }
-        self.draw_indices = Arc::new(out);
-        self.indices_id = self.indices_id.wrapping_add(1);
-    }
-
-    pub(super) fn load_filter_state(&mut self, ds: &Dataset) {
-        if let Ok((_name, _labels, categories, _pal)) = ds.obs_categorical(self.active_obs_idx) {
-            if categories.len() > MAX_FILTER_CATEGORIES {
-                self.enabled_categories.clear();
-                return;
-            }
-            if let Some(saved) = self.category_state.get(&self.active_obs_idx) {
-                if saved.len() == categories.len() {
-                    self.enabled_categories = saved.clone();
-                    return;
-                }
-            }
-            self.enabled_categories = vec![true; categories.len()];
-        }
-    }
-
-    pub(super) fn next_advanced_id(&mut self) -> u64 {
+    fn next_advanced_id(&mut self) -> u64 {
         let id = self.advanced_next_id;
         self.advanced_next_id = self.advanced_next_id.wrapping_add(1);
         id
@@ -1142,7 +1100,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn apply_advanced_to_timeline(&mut self) {
+    fn apply_advanced_to_timeline(&mut self) {
         if self.advanced_cards.len() < 2 {
             return;
         }
@@ -1197,14 +1155,9 @@ impl StvizApp {
         self.from_space = *self.space_path.first().unwrap_or(&self.from_space);
         self.to_space = *self.space_path.last().unwrap_or(&self.to_space);
     }
-
-    pub(super) fn mark_grid_dirty(&mut self) {
-        self.grid_version = self.grid_version.wrapping_add(1);
-        self.grid_cache = None;
-    }
 }
 
-pub(super) fn render_advanced_card_controls(
+fn render_advanced_card_controls(
     ui: &mut egui::Ui,
     card: &mut AdvancedCard,
     ds: Option<&Dataset>,
@@ -1348,4 +1301,55 @@ pub(super) fn render_advanced_card_controls(
 
     card.space_idx = space_idx;
     card.color_key = color_key;
+}
+
+fn constrain_card_pos(
+    pos: egui::Pos2,
+    size: egui::Vec2,
+    canvas_rect: egui::Rect,
+    inspector_rect: egui::Rect,
+) -> egui::Pos2 {
+    let mut out = pos;
+    let max_x = (canvas_rect.width() - size.x).max(0.0);
+    let max_y = (canvas_rect.height() - size.y).max(0.0);
+    out.x = out.x.clamp(0.0, max_x);
+    out.y = out.y.clamp(0.0, max_y);
+    let rect = egui::Rect::from_min_size(canvas_rect.min + out.to_vec2(), size);
+    if rect.intersects(inspector_rect) {
+        let below_y = inspector_rect.bottom() + 12.0;
+        if below_y + size.y <= canvas_rect.bottom() {
+            out.y = below_y - canvas_rect.min.y;
+        } else {
+            let right_x = inspector_rect.right() + 12.0;
+            if right_x + size.x <= canvas_rect.right() {
+                out.x = right_x - canvas_rect.min.x;
+            } else {
+                out.x = max_x;
+                out.y = max_y;
+            }
+        }
+    }
+    out
+}
+
+const ADVANCED_VIEW_FPS_CAP_HZ: f32 = 60.0;
+
+#[cfg(test)]
+mod tests {
+    use super::constrain_card_pos;
+    use eframe::egui;
+
+    #[test]
+    fn constrain_card_pos_keeps_card_inside_canvas_and_off_inspector() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let far_away = egui::Rect::from_min_size(egui::pos2(1000.0, 1000.0), egui::vec2(1.0, 1.0));
+        let size = egui::vec2(100.0, 50.0);
+
+        let clamped = constrain_card_pos(egui::pos2(-20.0, 500.0), size, canvas, far_away);
+        assert_eq!(clamped, egui::pos2(0.0, 250.0));
+
+        let inspector = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(150.0, 100.0));
+        let moved = constrain_card_pos(egui::pos2(10.0, 10.0), size, canvas, inspector);
+        assert_eq!(moved, egui::pos2(10.0, 112.0));
+    }
 }

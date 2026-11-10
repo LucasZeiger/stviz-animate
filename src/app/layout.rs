@@ -7,7 +7,7 @@ use crate::data::Dataset;
 use std::sync::Arc;
 
 impl StvizApp {
-    pub(super) fn effective_bbox(
+    fn effective_bbox(
         &mut self,
         ds: &Dataset,
         space_idx: usize,
@@ -180,7 +180,7 @@ impl StvizApp {
         self.grid_positions_for_space(ds, space_idx, false)
     }
 
-    pub(super) fn grid_positions_for_space(
+    fn grid_positions_for_space(
         &mut self,
         ds: &Dataset,
         space_idx: usize,
@@ -519,5 +519,10 @@ impl StvizApp {
             out.push((label, label_pos));
         }
         Some(out)
+    }
+
+    pub(super) fn mark_grid_dirty(&mut self) {
+        self.grid_version = self.grid_version.wrapping_add(1);
+        self.grid_cache = None;
     }
 }

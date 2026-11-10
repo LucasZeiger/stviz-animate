@@ -170,7 +170,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn segment_for_t(&self) -> (usize, f32) {
+    fn segment_for_t(&self) -> (usize, f32) {
         let len = self.key_times.len();
         if len < 2 {
             return (0, self.t.clamp(0.0, 1.0));

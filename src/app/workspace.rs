@@ -15,7 +15,7 @@ use std::{
 };
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkspaceFile {
+struct WorkspaceFile {
     version: u32,
     dataset_path: PathBuf,
     dataset_points: u32,
@@ -47,7 +47,7 @@ pub(super) struct WorkspaceFile {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkspaceKeyframe {
+struct WorkspaceKeyframe {
     space: String,
     color: WorkspaceColor,
     filter: Option<WorkspaceFilter>,
@@ -55,7 +55,7 @@ pub(super) struct WorkspaceKeyframe {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
-pub(super) enum WorkspaceColor {
+enum WorkspaceColor {
     Current,
     Categorical(String),
     Continuous(String),
@@ -63,19 +63,19 @@ pub(super) enum WorkspaceColor {
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkspaceFilter {
+struct WorkspaceFilter {
     field: String,
     enabled_categories: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkspaceOverrides {
+struct WorkspaceOverrides {
     field: String,
     colors: HashMap<String, u32>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub(super) struct WorkspaceSampleGrid {
+struct WorkspaceSampleGrid {
     enabled: bool,
     obs: Option<String>,
     space: Option<String>,
@@ -100,7 +100,7 @@ impl StvizApp {
         self.load_dataset(&path)
     }
 
-    pub(super) fn workspace_filter(
+    fn workspace_filter(
         ds: &Dataset,
         obs_idx: usize,
         enabled: &[bool],
@@ -116,7 +116,7 @@ impl StvizApp {
         })
     }
 
-    pub(super) fn resolve_workspace_filter(
+    fn resolve_workspace_filter(
         ds: &Dataset,
         saved: &WorkspaceFilter,
     ) -> anyhow::Result<KeyframeFilter> {
@@ -151,7 +151,7 @@ impl StvizApp {
         })
     }
 
-    pub(super) fn build_workspace(&self) -> anyhow::Result<WorkspaceFile> {
+    fn build_workspace(&self) -> anyhow::Result<WorkspaceFile> {
         let ds = self
             .dataset
             .as_ref()
@@ -331,7 +331,7 @@ impl StvizApp {
         Ok(())
     }
 
-    pub(super) fn apply_workspace(&mut self, workspace: WorkspaceFile) -> anyhow::Result<()> {
+    fn apply_workspace(&mut self, workspace: WorkspaceFile) -> anyhow::Result<()> {
         self.load_dataset(&workspace.dataset_path)?;
         let ds = self.dataset.clone().unwrap();
         if ds.meta.n_points != workspace.dataset_points {

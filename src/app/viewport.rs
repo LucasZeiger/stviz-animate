@@ -3,56 +3,13 @@
 use super::{
     render_callback::PointCloudCallback,
     util::{apply_ease, contrast_color, export_phase_to_t},
-    ColorKey, StvizApp, UiTheme,
+    ColorKey, StvizApp,
 };
 use crate::render::Uniforms;
 use eframe::egui;
 use std::sync::Arc;
 
 impl StvizApp {
-    pub(super) fn visuals_for_theme(theme: UiTheme) -> egui::Visuals {
-        match theme {
-            UiTheme::Dark => egui::Visuals::dark(),
-            UiTheme::Light => egui::Visuals::light(),
-            UiTheme::Slate => {
-                let mut visuals = egui::Visuals::dark();
-                visuals.panel_fill = egui::Color32::from_rgb(22, 26, 32);
-                visuals.window_fill = egui::Color32::from_rgb(22, 26, 32);
-                visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(32, 37, 44);
-                visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 52, 62);
-                visuals.widgets.active.bg_fill = egui::Color32::from_rgb(60, 70, 84);
-                visuals.selection.bg_fill = egui::Color32::from_rgb(70, 110, 160);
-                visuals.selection.stroke =
-                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 190, 235));
-                visuals
-            }
-            UiTheme::Matrix => {
-                let mut visuals = egui::Visuals::dark();
-                visuals.panel_fill = egui::Color32::from_rgb(5, 9, 7);
-                visuals.window_fill = egui::Color32::from_rgb(5, 9, 7);
-                visuals.override_text_color = Some(egui::Color32::from_rgb(95, 210, 120));
-                visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(8, 16, 11);
-                visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(12, 24, 16);
-                visuals.widgets.active.bg_fill = egui::Color32::from_rgb(16, 32, 20);
-                visuals.widgets.inactive.bg_stroke =
-                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 150, 90));
-                visuals.widgets.hovered.bg_stroke =
-                    egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(90, 210, 130));
-                visuals.widgets.active.bg_stroke =
-                    egui::Stroke::new(1.4_f32, egui::Color32::from_rgb(120, 245, 160));
-                visuals.widgets.inactive.fg_stroke =
-                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(70, 170, 105));
-                visuals.widgets.hovered.fg_stroke =
-                    egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(110, 230, 150));
-                visuals.selection.bg_fill = egui::Color32::from_rgb(0, 90, 50);
-                visuals.selection.stroke =
-                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(110, 230, 150));
-                visuals.hyperlink_color = egui::Color32::from_rgb(80, 190, 110);
-                visuals
-            }
-        }
-    }
-
     pub(super) fn ui_viewport(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
         self.last_viewport_points = rect;
@@ -345,7 +302,7 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn draw_view_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+    fn draw_view_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         let painter = ui.painter();
         if self.show_axes {
             let margin = 10.0;
@@ -436,7 +393,7 @@ impl StvizApp {
             });
     }
 
-    pub(super) fn viewport_crop_px(rect: egui::Rect, ppp: f32) -> Option<[u32; 4]> {
+    fn viewport_crop_px(rect: egui::Rect, ppp: f32) -> Option<[u32; 4]> {
         if !rect.is_positive() {
             return None;
         }
@@ -449,7 +406,7 @@ impl StvizApp {
         Some([x0 as u32, y0 as u32, w, h])
     }
 
-    pub(super) fn viewport_crop_px_even(rect: egui::Rect, ppp: f32) -> Option<[u32; 4]> {
+    fn viewport_crop_px_even(rect: egui::Rect, ppp: f32) -> Option<[u32; 4]> {
         let mut crop = Self::viewport_crop_px(rect, ppp)?;
         if crop[2] > 1 && crop[2] % 2 == 1 {
             crop[2] -= 1;
@@ -461,5 +418,71 @@ impl StvizApp {
             return None;
         }
         Some(crop)
+    }
+
+    pub(super) fn apply_fullscreen(&self, ctx: &egui::Context) {
+        if Self::is_wsl() {
+            return;
+        }
+        let enable = self.fullscreen;
+        let is_wayland = std::env::var("XDG_SESSION_TYPE")
+            .map(|v| v.eq_ignore_ascii_case("wayland"))
+            .unwrap_or(false);
+        if is_wayland {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            if !enable {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+            }
+        } else {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(enable));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(!enable));
+        }
+    }
+
+    pub(super) fn update_main_view_refresh(&mut self, ctx: &egui::Context, _frame: &eframe::Frame) {
+        let now = ctx.input(|i| i.time);
+        if now - self.main_view_last_refresh_query < 2.0 {
+            return;
+        }
+        self.main_view_last_refresh_query = now;
+        let mut refresh_hz = self.main_view_refresh_hz;
+        #[cfg(windows)]
+        {
+            if let Some(hz) = Self::query_refresh_hz_windows(_frame) {
+                refresh_hz = hz;
+            }
+        }
+        if refresh_hz <= 1.0 {
+            refresh_hz = 60.0;
+        }
+        self.main_view_refresh_hz = refresh_hz;
+        self.main_view_fps_cap_hz = (refresh_hz - 1.0).max(30.0);
+    }
+
+    #[cfg(windows)]
+    fn query_refresh_hz_windows(frame: &eframe::Frame) -> Option<f32> {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{GetDC, GetDeviceCaps, ReleaseDC, VREFRESH};
+
+        let handle = frame.window_handle().ok()?;
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return None;
+        };
+        let hwnd = HWND(handle.hwnd.get() as *mut core::ffi::c_void);
+        unsafe {
+            let hdc = GetDC(hwnd);
+            if hdc.is_invalid() {
+                return None;
+            }
+            let refresh = GetDeviceCaps(hdc, VREFRESH) as i32;
+            ReleaseDC(hwnd, hdc);
+            if refresh > 1 {
+                Some(refresh as f32)
+            } else {
+                None
+            }
+        }
     }
 }
