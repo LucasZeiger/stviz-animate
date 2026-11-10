@@ -1,6 +1,15 @@
 //! The left-hand settings panel.
 
-use super::*;
+use super::{
+    util::{chrono_like_timestamp, draw_gradient_legend, obs_name, render_filter_rows},
+    CategoricalPalette, CategoryPaletteCache, ColorMode, ExportEncodingSpeed, ExportQuality,
+    ExportVideoQuality, LegendRange, SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
+    MAX_GRID_CATEGORIES, SCREENSHOT_RESOLUTION,
+};
+use crate::{color::gradient_map, data::ObsMeta};
+use eframe::egui;
+use rand::seq::SliceRandom;
+use std::{path::PathBuf, sync::Arc};
 
 impl StvizApp {
     pub(super) fn ui_left_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -61,7 +70,7 @@ impl StvizApp {
         let drop_active = drop_resp.hovered() || hover_files;
         let visuals = ui.visuals();
         let busy_fill = egui::Color32::from_rgb(60, 90, 140);
-        let busy_stroke = egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 170, 220));
+        let busy_stroke = egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(120, 170, 220));
         let drop_fill = if self.convert_running {
             busy_fill
         } else if drop_active {
@@ -983,7 +992,7 @@ impl StvizApp {
             output_frame = output_frame
                 .fill(egui::Color32::from_rgb(40, 60, 90))
                 .stroke(egui::Stroke::new(
-                    1.2,
+                    1.2_f32,
                     egui::Color32::from_rgb(120, 170, 220),
                 ));
         }

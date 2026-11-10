@@ -1,6 +1,9 @@
 //! egui paint callback that draws the point cloud with wgpu.
 
-use super::*;
+use crate::render::{PointCloudGpu, SharedRender};
+use eframe::egui;
+use egui_wgpu::{wgpu, CallbackTrait};
+use std::sync::Arc;
 
 pub(super) struct PointCloudCallback {
     pub(super) shared: Arc<SharedRender>,

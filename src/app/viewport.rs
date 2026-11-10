@@ -1,6 +1,13 @@
 //! Central viewport, theme visuals and view overlays.
 
-use super::*;
+use super::{
+    render_callback::PointCloudCallback,
+    util::{apply_ease, contrast_color, export_phase_to_t},
+    ColorKey, StvizApp, UiTheme,
+};
+use crate::render::Uniforms;
+use eframe::egui;
+use std::sync::Arc;
 
 impl StvizApp {
     pub(super) fn visuals_for_theme(theme: UiTheme) -> egui::Visuals {
@@ -16,7 +23,7 @@ impl StvizApp {
                 visuals.widgets.active.bg_fill = egui::Color32::from_rgb(60, 70, 84);
                 visuals.selection.bg_fill = egui::Color32::from_rgb(70, 110, 160);
                 visuals.selection.stroke =
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(150, 190, 235));
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(150, 190, 235));
                 visuals
             }
             UiTheme::Matrix => {
@@ -28,18 +35,18 @@ impl StvizApp {
                 visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(12, 24, 16);
                 visuals.widgets.active.bg_fill = egui::Color32::from_rgb(16, 32, 20);
                 visuals.widgets.inactive.bg_stroke =
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 150, 90));
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(60, 150, 90));
                 visuals.widgets.hovered.bg_stroke =
-                    egui::Stroke::new(1.2, egui::Color32::from_rgb(90, 210, 130));
+                    egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(90, 210, 130));
                 visuals.widgets.active.bg_stroke =
-                    egui::Stroke::new(1.4, egui::Color32::from_rgb(120, 245, 160));
+                    egui::Stroke::new(1.4_f32, egui::Color32::from_rgb(120, 245, 160));
                 visuals.widgets.inactive.fg_stroke =
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(70, 170, 105));
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(70, 170, 105));
                 visuals.widgets.hovered.fg_stroke =
-                    egui::Stroke::new(1.2, egui::Color32::from_rgb(110, 230, 150));
+                    egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(110, 230, 150));
                 visuals.selection.bg_fill = egui::Color32::from_rgb(0, 90, 50);
                 visuals.selection.stroke =
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(110, 230, 150));
+                    egui::Stroke::new(1.0_f32, egui::Color32::from_rgb(110, 230, 150));
                 visuals.hyperlink_color = egui::Color32::from_rgb(80, 190, 110);
                 visuals
             }

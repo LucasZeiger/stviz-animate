@@ -1,6 +1,18 @@
 //! Dataset/workspace file dialogs and workspace save/restore.
 
-use super::*;
+use super::{
+    CategoricalPalette, ColorKey, ColorMode, EaseMode, ExportEncodingSpeed, KeyframeFilter,
+    PlaybackMode, SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
+};
+use crate::data::{Dataset, ObsMeta};
+use anyhow::Context as _;
+use eframe::egui;
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 #[derive(Serialize, Deserialize)]
 pub(super) struct WorkspaceFile {
@@ -88,7 +100,11 @@ impl StvizApp {
         self.load_dataset(&path)
     }
 
-    pub(super) fn workspace_filter(ds: &Dataset, obs_idx: usize, enabled: &[bool]) -> Option<WorkspaceFilter> {
+    pub(super) fn workspace_filter(
+        ds: &Dataset,
+        obs_idx: usize,
+        enabled: &[bool],
+    ) -> Option<WorkspaceFilter> {
         let (name, _labels, categories, _pal) = ds.obs_categorical(obs_idx).ok()?;
         Some(WorkspaceFilter {
             field: name.to_string(),

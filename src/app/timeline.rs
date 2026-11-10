@@ -1,6 +1,12 @@
 //! The bottom timeline bar.
 
-use super::*;
+use super::{
+    util::obs_name, ColorKey, EaseMode, KeyColorKind, KeyframeFilter, PlaybackMode, StvizApp,
+    MAX_FILTER_CATEGORIES,
+};
+use crate::data::ObsMeta;
+use eframe::egui;
+use std::sync::Arc;
 
 impl StvizApp {
     pub(super) fn ui_timeline_bar(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -397,7 +403,7 @@ impl StvizApp {
                             .inner_margin(egui::Margin::same(2));
                         if is_selected {
                             frame = frame.stroke(egui::Stroke::new(
-                                1.4,
+                                1.4_f32,
                                 egui::Color32::from_rgb(80, 180, 255),
                             ));
                         }
@@ -807,7 +813,7 @@ impl StvizApp {
                         egui::pos2(line_x, target_rect.top()),
                         egui::pos2(line_x, target_rect.bottom()),
                     ],
-                    egui::Stroke::new(2.0, line_color),
+                    egui::Stroke::new(2.0_f32, line_color),
                 );
             }
             if let Some((_, rect)) = card_rects.iter().find(|(idx, _)| *idx == drag_idx) {

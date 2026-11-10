@@ -1,6 +1,7 @@
 //! Playback ticking, hotkeys and drag-and-drop.
 
-use super::*;
+use super::{PlaybackMode, StvizApp};
+use eframe::egui;
 
 impl StvizApp {
     pub(super) fn maybe_update_playback(&mut self, ctx: &egui::Context) {

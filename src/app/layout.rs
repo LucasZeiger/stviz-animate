@@ -1,6 +1,10 @@
 //! Plot bounding boxes, space transforms and sample-grid layout.
 
-use super::*;
+use super::{
+    util::apply_ease, GridCache, GridCacheKey, SampleGridLabelMode, StvizApp, MAX_GRID_CATEGORIES,
+};
+use crate::data::Dataset;
+use std::sync::Arc;
 
 impl StvizApp {
     pub(super) fn effective_bbox(
@@ -378,7 +382,11 @@ impl StvizApp {
         Some((positions, bbox))
     }
 
-    pub(super) fn ensure_sample_grid_custom_labels(&mut self, obs_idx: usize, categories: &[String]) {
+    pub(super) fn ensure_sample_grid_custom_labels(
+        &mut self,
+        obs_idx: usize,
+        categories: &[String],
+    ) {
         if self.sample_grid_custom_labels_obs_idx != Some(obs_idx)
             || self.sample_grid_custom_labels.len() != categories.len()
         {
@@ -387,7 +395,10 @@ impl StvizApp {
         }
     }
 
-    pub(super) fn sample_grid_label_positions(&self, ds: &Dataset) -> Option<Vec<(String, [f32; 2])>> {
+    pub(super) fn sample_grid_label_positions(
+        &self,
+        ds: &Dataset,
+    ) -> Option<Vec<(String, [f32; 2])>> {
         if !self.sample_grid_enabled || !self.sample_grid_labels_enabled {
             return None;
         }

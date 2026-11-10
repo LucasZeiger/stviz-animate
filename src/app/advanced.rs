@@ -1,6 +1,13 @@
 //! The advanced (node-based) timeline editor.
 
-use super::*;
+use super::{
+    util::constrain_card_pos, AdvancedCard, AdvancedCardFilter, AdvancedConnection,
+    AdvancedConnectionDrag, ColorKey, KeyColorKind, KeyframeFilter, StvizApp,
+    ADVANCED_VIEW_FPS_CAP_HZ, MAX_FILTER_CATEGORIES,
+};
+use crate::data::{Dataset, ObsMeta};
+use eframe::egui;
+use std::sync::Arc;
 
 impl StvizApp {
     pub(super) fn ui_advanced_timeline(&mut self, ctx: &egui::Context) {
@@ -230,7 +237,7 @@ impl StvizApp {
                             egui::pos2(x, canvas_rect.top()),
                             egui::pos2(x, canvas_rect.bottom()),
                         ],
-                        egui::Stroke::new(1.0, grid_color),
+                        egui::Stroke::new(1.0_f32, grid_color),
                     );
                 }
                 for j in 0..rows.min(max_lines) {
@@ -240,7 +247,7 @@ impl StvizApp {
                             egui::pos2(canvas_rect.left(), y),
                             egui::pos2(canvas_rect.right(), y),
                         ],
-                        egui::Stroke::new(1.0, grid_color),
+                        egui::Stroke::new(1.0_f32, grid_color),
                     );
                 }
             }
@@ -281,7 +288,7 @@ impl StvizApp {
                 };
             }
         }
-        let connection_stroke = egui::Stroke::new(1.4, ui.visuals().selection.stroke.color);
+        let connection_stroke = egui::Stroke::new(1.4_f32, ui.visuals().selection.stroke.color);
         {
             let painter = ui.painter();
             for conn in &self.advanced_connections {
@@ -327,7 +334,7 @@ impl StvizApp {
                 ui.visuals().widgets.inactive.bg_fill
             };
             let stroke = if selected {
-                egui::Stroke::new(1.5, ui.visuals().selection.stroke.color)
+                egui::Stroke::new(1.5_f32, ui.visuals().selection.stroke.color)
             } else {
                 ui.visuals().widgets.noninteractive.bg_stroke
             };
@@ -374,8 +381,8 @@ impl StvizApp {
                 };
                 painter.circle_filled(in_pos, node_r, in_color);
                 painter.circle_filled(out_pos, node_r, out_color);
-                painter.circle_stroke(in_pos, node_r, egui::Stroke::new(1.0, stroke.color));
-                painter.circle_stroke(out_pos, node_r, egui::Stroke::new(1.0, stroke.color));
+                painter.circle_stroke(in_pos, node_r, egui::Stroke::new(1.0_f32, stroke.color));
+                painter.circle_stroke(out_pos, node_r, egui::Stroke::new(1.0_f32, stroke.color));
             }
 
             let node_size = egui::vec2(node_r * 2.6, node_r * 2.6);
@@ -604,7 +611,7 @@ impl StvizApp {
                 painter.rect_stroke(
                     selection_rect,
                     0.0,
-                    egui::Stroke::new(1.2, egui::Color32::from_rgb(120, 200, 255)),
+                    egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(120, 200, 255)),
                     egui::StrokeKind::Inside,
                 );
                 for (i, card) in self.advanced_cards.iter().enumerate() {
@@ -681,7 +688,10 @@ impl StvizApp {
             .show(ctx, |ui| {
                 let mut frame = egui::Frame::NONE
                     .fill(ui.visuals().extreme_bg_color)
-                    .stroke(egui::Stroke::new(1.5, ui.visuals().selection.stroke.color))
+                    .stroke(egui::Stroke::new(
+                        1.5_f32,
+                        ui.visuals().selection.stroke.color,
+                    ))
                     .corner_radius(egui::CornerRadius::same(6))
                     .inner_margin(egui::Margin::same(8));
                 frame.shadow = egui::epaint::Shadow {

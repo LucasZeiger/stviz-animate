@@ -1,6 +1,15 @@
 //! Dataset loading, color/filter recomputation and draw-index selection.
 
-use super::*;
+use super::{
+    util::{find_obs_by_name, find_space_by_name},
+    AdvancedCardFilter, ColorKey, ColorMode, LegendRange, StvizApp, MAX_FILTER_CATEGORIES,
+};
+use crate::{
+    color::{categorical_palette, gradient_map, pack_rgba8},
+    data::{Dataset, ObsMeta},
+};
+use anyhow::Context as _;
+use std::{path::Path, sync::Arc};
 
 impl StvizApp {
     pub(super) fn load_dataset(&mut self, path: &Path) -> anyhow::Result<()> {

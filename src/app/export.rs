@@ -1,9 +1,27 @@
 //! Video/frame export and screenshots.
 
-use super::*;
+use super::{
+    util::{apply_ease, chrono_like_timestamp, obs_name, save_color_image_png, save_rgba_png},
+    ColorKey, DirectVideoExport, ExportQuality, ExportVideoQuality, ScreenshotRequest, StvizApp,
+};
+use crate::{
+    camera::Camera2D,
+    render::{PointCloudGpu, Uniforms},
+};
+use eframe::egui;
+use egui_wgpu::wgpu;
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    process::{Command, Stdio},
+};
 
 impl StvizApp {
-    pub(super) fn run_python_cv2_export(&mut self, frames_dir: &Path, out_path: &Path) -> Result<(), String> {
+    pub(super) fn run_python_cv2_export(
+        &mut self,
+        frames_dir: &Path,
+        out_path: &Path,
+    ) -> Result<(), String> {
         let script = self.project_dir.join("python").join("export_video_cv2.py");
         if !script.exists() {
             return Err(format!("OpenCV exporter not found: {}", script.display()));

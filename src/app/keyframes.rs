@@ -1,6 +1,14 @@
 //! Keyframe bookkeeping and per-segment color/filter resolution.
 
-use super::*;
+use super::{
+    AdvancedCardFilter, ColorCacheEntry, ColorKey, KeyframeFilter, LegendRange, StvizApp,
+    MAX_FILTER_CATEGORIES,
+};
+use crate::{
+    color::{categorical_palette, gradient_map, pack_rgba8},
+    data::Dataset,
+};
+use std::sync::Arc;
 
 impl StvizApp {
     pub(super) fn ensure_color_path_len(&mut self, len: usize) {
@@ -347,7 +355,10 @@ impl StvizApp {
         (filtered, filtered_id, true)
     }
 
-    pub(super) fn segment_filters(&self, seg_idx: usize) -> (Option<KeyframeFilter>, Option<KeyframeFilter>) {
+    pub(super) fn segment_filters(
+        &self,
+        seg_idx: usize,
+    ) -> (Option<KeyframeFilter>, Option<KeyframeFilter>) {
         if self.advanced_timeline_open && self.advanced_cards.len() == self.space_path.len() {
             let to_key = |filter: &Option<AdvancedCardFilter>| {
                 filter.as_ref().map(|filter| KeyframeFilter {
@@ -379,7 +390,10 @@ impl StvizApp {
         )
     }
 
-    pub(super) fn current_segment(&self, ds: &Dataset) -> (usize, usize, ColorKey, ColorKey, f32, usize) {
+    pub(super) fn current_segment(
+        &self,
+        ds: &Dataset,
+    ) -> (usize, usize, ColorKey, ColorKey, f32, usize) {
         let n_spaces = ds.meta.spaces.len();
         let clamp_idx = |idx: usize| idx.min(n_spaces.saturating_sub(1));
         let mut path: Vec<usize> = self

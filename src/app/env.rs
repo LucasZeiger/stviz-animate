@@ -1,6 +1,10 @@
 //! Locating Python, ffmpeg and the app/project directories.
 
-use super::*;
+use super::{util::chrono_like_timestamp, StvizApp, APP_DATA_DIR_NAME, MIN_PYTHON_VERSION};
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 impl StvizApp {
     pub(super) fn detect_python_cmd() -> Result<(String, String), String> {
@@ -270,7 +274,12 @@ Then add that path to your system environment variables (PATH).";
         self.ffmpeg_path = path;
     }
 
-    pub(super) fn run_ffmpeg_install_attempt(&mut self, label: &str, program: &str, args: &[&str]) -> bool {
+    pub(super) fn run_ffmpeg_install_attempt(
+        &mut self,
+        label: &str,
+        program: &str,
+        args: &[&str],
+    ) -> bool {
         self.append_export_log(&format!(
             "Trying ffmpeg installer ({label}): {} {}",
             program,

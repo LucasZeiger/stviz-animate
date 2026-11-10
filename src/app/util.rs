@@ -1,6 +1,12 @@
 //! Small free-standing helpers shared across the app modules.
 
-use super::*;
+use super::{EaseMode, PlaybackMode};
+use crate::{
+    color::pack_rgba8,
+    data::{Dataset, ObsMeta},
+};
+use eframe::egui;
+use std::path::Path;
 
 pub(super) fn save_color_image_png(
     img: &egui::ColorImage,
@@ -51,7 +57,12 @@ pub(super) fn save_color_image_png(
     Ok(())
 }
 
-pub(super) fn save_rgba_png(path: &Path, width: u32, height: u32, rgba: &[u8]) -> anyhow::Result<()> {
+pub(super) fn save_rgba_png(
+    path: &Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> anyhow::Result<()> {
     use image::ImageEncoder;
 
     std::fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).ok();

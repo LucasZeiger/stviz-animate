@@ -1,23 +1,19 @@
 use crate::{
     camera::Camera2D,
-    color::{categorical_palette, categorical_palette_named, gradient_map, pack_rgba8},
-    data::{Dataset, ObsMeta},
-    render::{PointCloudGpu, SharedRender, Uniforms},
+    color::{categorical_palette, categorical_palette_named},
+    data::Dataset,
+    render::{PointCloudGpu, SharedRender},
 };
-use anyhow::Context as _;
 use eframe::egui;
-use egui_wgpu::{wgpu, CallbackTrait};
-use rand::{seq::SliceRandom, Rng};
+use egui_wgpu::wgpu;
 #[cfg(windows)]
 use raw_window_handle::HasWindowHandle;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
-    io::Write,
-    path::{Path, PathBuf},
-    process::{Child, ChildStdin, Command, Stdio},
+    path::PathBuf,
+    process::{Child, ChildStdin},
     sync::Arc,
-    thread,
 };
 
 mod advanced;
@@ -34,9 +30,6 @@ mod timeline;
 mod util;
 mod viewport;
 mod workspace;
-
-use render_callback::PointCloudCallback;
-use util::*;
 
 const MAX_FILTER_CATEGORIES: usize = 5000;
 const MAX_GRID_CATEGORIES: usize = 512;
