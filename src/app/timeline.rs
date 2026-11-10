@@ -4,7 +4,7 @@ use super::{
     util::obs_name, ColorKey, EaseMode, KeyColorKind, KeyframeFilter, PlaybackMode, StvizApp,
     MAX_FILTER_CATEGORIES,
 };
-use crate::data::ObsMeta;
+use crate::data::{Dataset, ObsMeta};
 use eframe::egui;
 use std::sync::Arc;
 
@@ -27,239 +27,8 @@ impl StvizApp {
             self.ensure_key_times_len(self.space_path.len());
         }
 
-        ui.horizontal(|ui| {
-            ui.group(|ui| {
-                ui.label("Transport");
-                ui.horizontal(|ui| {
-                    if ui
-                        .button(if self.playing { "Pause" } else { "Play" })
-                        .on_hover_text("Play or pause the timeline.")
-                        .clicked()
-                    {
-                        self.playing = !self.playing;
-                    }
-                    if ui
-                        .button("Stop")
-                        .on_hover_text("Stop and rewind to t = 0.")
-                        .clicked()
-                    {
-                        self.playing = false;
-                        self.play_direction = 1.0;
-                        self.t = 0.0;
-                    }
-                    if ui
-                        .button("Step -")
-                        .on_hover_text("Step back a bit.")
-                        .clicked()
-                    {
-                        self.t = (self.t - 0.01).clamp(0.0, 1.0);
-                    }
-                    if ui
-                        .button("Step +")
-                        .on_hover_text("Step forward a bit.")
-                        .clicked()
-                    {
-                        self.t = (self.t + 0.01).clamp(0.0, 1.0);
-                    }
-                });
-            });
-
-            ui.add_space(8.0);
-
-            ui.group(|ui| {
-                ui.label("Playback");
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Once, "Once");
-                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Loop, "Loop");
-                    ui.selectable_value(
-                        &mut self.playback_mode,
-                        PlaybackMode::PingPong,
-                        "Ping-pong",
-                    );
-                });
-                let min_speed = if self.space_path.len() > 5 {
-                    0.01
-                } else {
-                    0.05
-                };
-                if self.speed < min_speed {
-                    self.speed = min_speed;
-                }
-                ui.add(egui::Slider::new(&mut self.speed, min_speed..=2.0).text("speed"));
-            });
-
-            ui.add_space(8.0);
-
-            ui.group(|ui| {
-                ui.label("Easing");
-                let ease_label = match self.ease_mode {
-                    EaseMode::Linear => "Linear",
-                    EaseMode::Smoothstep => "Smoothstep",
-                    EaseMode::SineInOut => "Sine in-out",
-                    EaseMode::QuadInOut => "Quad in-out",
-                };
-                egui::ComboBox::from_id_salt("timeline_easing")
-                    .selected_text(ease_label)
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.ease_mode, EaseMode::Linear, "Linear");
-                        ui.selectable_value(
-                            &mut self.ease_mode,
-                            EaseMode::Smoothstep,
-                            "Smoothstep",
-                        );
-                        ui.selectable_value(
-                            &mut self.ease_mode,
-                            EaseMode::SineInOut,
-                            "Sine in-out",
-                        );
-                        ui.selectable_value(
-                            &mut self.ease_mode,
-                            EaseMode::QuadInOut,
-                            "Quad in-out",
-                        );
-                    });
-            });
-
-            ui.add_space(8.0);
-
-            ui.group(|ui| {
-                ui.label("Reset scaling");
-                let key_count = self.space_path.len().max(1);
-                if self.reset_view_key_idx >= key_count {
-                    self.reset_view_key_idx = key_count - 1;
-                }
-                ui.horizontal(|ui| {
-                    let key_label = self
-                        .space_path
-                        .get(self.reset_view_key_idx)
-                        .and_then(|idx| ds_ref.meta.spaces.get(*idx))
-                        .map(|s| format!("Key {}: {}", self.reset_view_key_idx + 1, s.name))
-                        .unwrap_or_else(|| format!("Key {}", self.reset_view_key_idx + 1));
-                    egui::ComboBox::from_id_salt("reset_view_key")
-                        .width(160.0)
-                        .selected_text(key_label)
-                        .show_ui(ui, |ui| {
-                            for (i, space_idx) in self.space_path.iter().enumerate() {
-                                let label = ds_ref
-                                    .meta
-                                    .spaces
-                                    .get(*space_idx)
-                                    .map(|s| format!("Key {}: {}", i + 1, s.name))
-                                    .unwrap_or_else(|| format!("Key {}", i + 1));
-                                ui.selectable_value(&mut self.reset_view_key_idx, i, label);
-                            }
-                        });
-                    if ui.button("Reset").clicked() {
-                        let (active_from, active_to, _color_from, _color_to, segment_t, _seg_idx) =
-                            self.current_segment(ds_ref);
-                        let mut from_override: Option<Arc<Vec<f32>>> = None;
-                        let mut to_override: Option<Arc<Vec<f32>>> = None;
-                        if let Some((pos, _bbox)) = self.grid_positions_for(ds_ref, active_from) {
-                            from_override = Some(pos);
-                        }
-                        if let Some((pos, _bbox)) = self.grid_positions_for(ds_ref, active_to) {
-                            to_override = Some(pos);
-                        }
-                        let draw_indices = self.draw_indices.clone();
-                        let bbox = self.current_plot_bbox_for_segment(
-                            ds_ref,
-                            active_from,
-                            active_to,
-                            segment_t,
-                            draw_indices.as_slice(),
-                            from_override.as_deref().map(|v| v.as_slice()),
-                            to_override.as_deref().map(|v| v.as_slice()),
-                        );
-                        if let Some(bbox) = bbox {
-                            let vp = self.last_viewport_points.size();
-                            let ppp = ctx.pixels_per_point();
-                            self.camera.fit_bbox(bbox, [vp.x * ppp, vp.y * ppp], 0.9);
-                        } else if let Some(space_idx) = self.space_path.get(self.reset_view_key_idx)
-                        {
-                            if let Some(space) = ds_ref.meta.spaces.get(*space_idx) {
-                                let bbox = self.space_bbox_for_view(ds_ref, *space_idx, space);
-                                let vp = self.last_viewport_points.size();
-                                let ppp = ctx.pixels_per_point();
-                                self.camera.fit_bbox(bbox, [vp.x * ppp, vp.y * ppp], 0.9);
-                            }
-                        }
-                    }
-                });
-            });
-        });
-        let timeline_height = 36.0;
-        let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), timeline_height),
-            egui::Sense::click_and_drag(),
-        );
-        let painter = ui.painter();
-        let line_y = rect.center().y;
-        painter.line_segment(
-            [
-                egui::pos2(rect.left(), line_y),
-                egui::pos2(rect.right(), line_y),
-            ],
-            (3.0, egui::Color32::from_gray(100)),
-        );
-
-        let key_count = self.space_path.len().max(2);
-        let mut marker_handled = false;
-        for i in 0..key_count {
-            let t = *self.key_times.get(i).unwrap_or(&0.0);
-            let x = rect.left() + t * rect.width();
-            let pos = egui::pos2(x, line_y);
-            let marker_rect = egui::Rect::from_center_size(pos, egui::vec2(14.0, 14.0));
-            let marker_id = ui.id().with(("kf_marker", i));
-            let marker_resp = ui.interact(marker_rect, marker_id, egui::Sense::click_and_drag());
-            if marker_resp.clicked() {
-                self.selected_key_idx = Some(i);
-                marker_handled = true;
-            }
-            if marker_resp.dragged() {
-                self.selected_key_idx = Some(i);
-                marker_handled = true;
-                if i > 0 && i + 1 < key_count {
-                    if let Some(pos) = marker_resp.interact_pointer_pos() {
-                        let mut t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                        let min_t = self.key_times[i - 1] + 0.005;
-                        let max_t = self.key_times[i + 1] - 0.005;
-                        t = t.clamp(min_t, max_t);
-                        self.key_times[i] = t;
-                    }
-                }
-            }
-            let color = if Some(i) == self.selected_key_idx {
-                egui::Color32::from_rgb(255, 210, 90)
-            } else {
-                egui::Color32::from_gray(170)
-            };
-            painter.circle_filled(pos, 5.0, color);
-        }
-
-        let handle_x = rect.left() + self.t.clamp(0.0, 1.0) * rect.width();
-        painter.line_segment(
-            [
-                egui::pos2(handle_x, rect.top()),
-                egui::pos2(handle_x, rect.bottom()),
-            ],
-            (2.5, egui::Color32::from_rgb(100, 200, 255)),
-        );
-        if !marker_handled && (response.dragged() || response.clicked()) {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
-                self.t = t;
-            }
-        }
-
-        ui.horizontal(|ui| {
-            ui.label("t");
-            ui.add(
-                egui::DragValue::new(&mut self.t)
-                    .speed(0.001)
-                    .range(0.0..=1.0),
-            );
-            ui.checkbox(&mut self.color_path_enabled, "Use color keys");
-        });
+        self.ui_transport_controls(ui, ctx, ds_ref);
+        self.ui_timeline_scrubber(ui);
 
         ui.separator();
         ui.horizontal(|ui| {
@@ -875,5 +644,246 @@ impl StvizApp {
         if self.playing {
             ctx.request_repaint_after(self.main_view_frame_interval());
         }
+    }
+
+    /// Transport (play/stop/step), playback mode, speed, easing and view-reset controls.
+    fn ui_transport_controls(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, ds_ref: &Dataset) {
+        ui.horizontal(|ui| {
+            ui.group(|ui| {
+                ui.label("Transport");
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(if self.playing { "Pause" } else { "Play" })
+                        .on_hover_text("Play or pause the timeline.")
+                        .clicked()
+                    {
+                        self.playing = !self.playing;
+                    }
+                    if ui
+                        .button("Stop")
+                        .on_hover_text("Stop and rewind to t = 0.")
+                        .clicked()
+                    {
+                        self.playing = false;
+                        self.play_direction = 1.0;
+                        self.t = 0.0;
+                    }
+                    if ui
+                        .button("Step -")
+                        .on_hover_text("Step back a bit.")
+                        .clicked()
+                    {
+                        self.t = (self.t - 0.01).clamp(0.0, 1.0);
+                    }
+                    if ui
+                        .button("Step +")
+                        .on_hover_text("Step forward a bit.")
+                        .clicked()
+                    {
+                        self.t = (self.t + 0.01).clamp(0.0, 1.0);
+                    }
+                });
+            });
+
+            ui.add_space(8.0);
+
+            ui.group(|ui| {
+                ui.label("Playback");
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Once, "Once");
+                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Loop, "Loop");
+                    ui.selectable_value(
+                        &mut self.playback_mode,
+                        PlaybackMode::PingPong,
+                        "Ping-pong",
+                    );
+                });
+                let min_speed = if self.space_path.len() > 5 {
+                    0.01
+                } else {
+                    0.05
+                };
+                if self.speed < min_speed {
+                    self.speed = min_speed;
+                }
+                ui.add(egui::Slider::new(&mut self.speed, min_speed..=2.0).text("speed"));
+            });
+
+            ui.add_space(8.0);
+
+            ui.group(|ui| {
+                ui.label("Easing");
+                let ease_label = match self.ease_mode {
+                    EaseMode::Linear => "Linear",
+                    EaseMode::Smoothstep => "Smoothstep",
+                    EaseMode::SineInOut => "Sine in-out",
+                    EaseMode::QuadInOut => "Quad in-out",
+                };
+                egui::ComboBox::from_id_salt("timeline_easing")
+                    .selected_text(ease_label)
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.ease_mode, EaseMode::Linear, "Linear");
+                        ui.selectable_value(
+                            &mut self.ease_mode,
+                            EaseMode::Smoothstep,
+                            "Smoothstep",
+                        );
+                        ui.selectable_value(
+                            &mut self.ease_mode,
+                            EaseMode::SineInOut,
+                            "Sine in-out",
+                        );
+                        ui.selectable_value(
+                            &mut self.ease_mode,
+                            EaseMode::QuadInOut,
+                            "Quad in-out",
+                        );
+                    });
+            });
+
+            ui.add_space(8.0);
+
+            ui.group(|ui| {
+                ui.label("Reset scaling");
+                let key_count = self.space_path.len().max(1);
+                if self.reset_view_key_idx >= key_count {
+                    self.reset_view_key_idx = key_count - 1;
+                }
+                ui.horizontal(|ui| {
+                    let key_label = self
+                        .space_path
+                        .get(self.reset_view_key_idx)
+                        .and_then(|idx| ds_ref.meta.spaces.get(*idx))
+                        .map(|s| format!("Key {}: {}", self.reset_view_key_idx + 1, s.name))
+                        .unwrap_or_else(|| format!("Key {}", self.reset_view_key_idx + 1));
+                    egui::ComboBox::from_id_salt("reset_view_key")
+                        .width(160.0)
+                        .selected_text(key_label)
+                        .show_ui(ui, |ui| {
+                            for (i, space_idx) in self.space_path.iter().enumerate() {
+                                let label = ds_ref
+                                    .meta
+                                    .spaces
+                                    .get(*space_idx)
+                                    .map(|s| format!("Key {}: {}", i + 1, s.name))
+                                    .unwrap_or_else(|| format!("Key {}", i + 1));
+                                ui.selectable_value(&mut self.reset_view_key_idx, i, label);
+                            }
+                        });
+                    if ui.button("Reset").clicked() {
+                        let (active_from, active_to, _color_from, _color_to, segment_t, _seg_idx) =
+                            self.current_segment(ds_ref);
+                        let mut from_override: Option<Arc<Vec<f32>>> = None;
+                        let mut to_override: Option<Arc<Vec<f32>>> = None;
+                        if let Some((pos, _bbox)) = self.grid_positions_for(ds_ref, active_from) {
+                            from_override = Some(pos);
+                        }
+                        if let Some((pos, _bbox)) = self.grid_positions_for(ds_ref, active_to) {
+                            to_override = Some(pos);
+                        }
+                        let draw_indices = self.draw_indices.clone();
+                        let bbox = self.current_plot_bbox_for_segment(
+                            ds_ref,
+                            active_from,
+                            active_to,
+                            segment_t,
+                            draw_indices.as_slice(),
+                            from_override.as_deref().map(|v| v.as_slice()),
+                            to_override.as_deref().map(|v| v.as_slice()),
+                        );
+                        if let Some(bbox) = bbox {
+                            let vp = self.last_viewport_points.size();
+                            let ppp = ctx.pixels_per_point();
+                            self.camera.fit_bbox(bbox, [vp.x * ppp, vp.y * ppp], 0.9);
+                        } else if let Some(space_idx) = self.space_path.get(self.reset_view_key_idx)
+                        {
+                            if let Some(space) = ds_ref.meta.spaces.get(*space_idx) {
+                                let bbox = self.space_bbox_for_view(ds_ref, *space_idx, space);
+                                let vp = self.last_viewport_points.size();
+                                let ppp = ctx.pixels_per_point();
+                                self.camera.fit_bbox(bbox, [vp.x * ppp, vp.y * ppp], 0.9);
+                            }
+                        }
+                    }
+                });
+            });
+        });
+    }
+
+    /// The keyframe scrubber line and the numeric `t` field.
+    fn ui_timeline_scrubber(&mut self, ui: &mut egui::Ui) {
+        let timeline_height = 36.0;
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), timeline_height),
+            egui::Sense::click_and_drag(),
+        );
+        let painter = ui.painter();
+        let line_y = rect.center().y;
+        painter.line_segment(
+            [
+                egui::pos2(rect.left(), line_y),
+                egui::pos2(rect.right(), line_y),
+            ],
+            (3.0, egui::Color32::from_gray(100)),
+        );
+
+        let key_count = self.space_path.len().max(2);
+        let mut marker_handled = false;
+        for i in 0..key_count {
+            let t = *self.key_times.get(i).unwrap_or(&0.0);
+            let x = rect.left() + t * rect.width();
+            let pos = egui::pos2(x, line_y);
+            let marker_rect = egui::Rect::from_center_size(pos, egui::vec2(14.0, 14.0));
+            let marker_id = ui.id().with(("kf_marker", i));
+            let marker_resp = ui.interact(marker_rect, marker_id, egui::Sense::click_and_drag());
+            if marker_resp.clicked() {
+                self.selected_key_idx = Some(i);
+                marker_handled = true;
+            }
+            if marker_resp.dragged() {
+                self.selected_key_idx = Some(i);
+                marker_handled = true;
+                if i > 0 && i + 1 < key_count {
+                    if let Some(pos) = marker_resp.interact_pointer_pos() {
+                        let mut t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                        let min_t = self.key_times[i - 1] + 0.005;
+                        let max_t = self.key_times[i + 1] - 0.005;
+                        t = t.clamp(min_t, max_t);
+                        self.key_times[i] = t;
+                    }
+                }
+            }
+            let color = if Some(i) == self.selected_key_idx {
+                egui::Color32::from_rgb(255, 210, 90)
+            } else {
+                egui::Color32::from_gray(170)
+            };
+            painter.circle_filled(pos, 5.0, color);
+        }
+
+        let handle_x = rect.left() + self.t.clamp(0.0, 1.0) * rect.width();
+        painter.line_segment(
+            [
+                egui::pos2(handle_x, rect.top()),
+                egui::pos2(handle_x, rect.bottom()),
+            ],
+            (2.5, egui::Color32::from_rgb(100, 200, 255)),
+        );
+        if !marker_handled && (response.dragged() || response.clicked()) {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let t = ((pos.x - rect.left()) / rect.width()).clamp(0.0, 1.0);
+                self.t = t;
+            }
+        }
+
+        ui.horizontal(|ui| {
+            ui.label("t");
+            ui.add(
+                egui::DragValue::new(&mut self.t)
+                    .speed(0.001)
+                    .range(0.0..=1.0),
+            );
+            ui.checkbox(&mut self.color_path_enabled, "Use color keys");
+        });
     }
 }
