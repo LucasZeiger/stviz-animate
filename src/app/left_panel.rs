@@ -1,16 +1,18 @@
 //! The left-hand settings panel.
 
-use super::util::{color32_from_packed, format_scale_value};
 use super::{
-    util::{chrono_like_timestamp, obs_name},
+    export::SCREENSHOT_RESOLUTION,
+    util::{
+        categorical_obs, chrono_like_timestamp, color32_from_packed, continuous_obs,
+        format_scale_value, obs_name,
+    },
     CategoricalPalette, CategoryPaletteCache, ColorMode, ExportEncodingSpeed, ExportQuality,
     ExportVideoQuality, LegendRange, SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
     MAX_GRID_CATEGORIES,
 };
-use crate::color::pack_rgba8;
 use crate::{
-    color::gradient_map,
-    data::{Dataset, ObsMeta},
+    color::{gradient_map, pack_rgba8},
+    data::Dataset,
 };
 use eframe::egui;
 use rand::seq::SliceRandom;
@@ -360,12 +362,7 @@ impl StvizApp {
         }
 
         if self.sample_grid_enabled {
-            let mut options: Vec<(usize, String)> = Vec::new();
-            for (i, o) in ds.meta.obs.iter().enumerate() {
-                if let ObsMeta::Categorical { name, .. } = o {
-                    options.push((i, name.clone()));
-                }
-            }
+            let options = categorical_obs(ds);
 
             if options.is_empty() {
                 ui.label("No categorical .obs for sample grouping.");
@@ -532,12 +529,7 @@ impl StvizApp {
         match self.color_mode {
             ColorMode::Categorical => {
                 // choose categorical obs
-                let mut options: Vec<(usize, String)> = Vec::new();
-                for (i, o) in ds.meta.obs.iter().enumerate() {
-                    if let ObsMeta::Categorical { name, .. } = o {
-                        options.push((i, name.clone()));
-                    }
-                }
+                let options = categorical_obs(ds);
 
                 if options.is_empty() {
                     ui.label("No categorical .obs exported.");
@@ -828,12 +820,7 @@ impl StvizApp {
                 }
             }
             ColorMode::Continuous => {
-                let mut options: Vec<(usize, String)> = Vec::new();
-                for (i, o) in ds.meta.obs.iter().enumerate() {
-                    if let ObsMeta::Continuous { name, .. } = o {
-                        options.push((i, name.clone()));
-                    }
-                }
+                let options = continuous_obs(ds);
                 if options.is_empty() {
                     ui.label("No continuous .obs exported.");
                 } else {
@@ -1318,5 +1305,3 @@ fn draw_gradient_legend(ui: &mut egui::Ui, label: &str, vmin: f32, vmax: f32) {
         format_scale_value(vmax)
     ));
 }
-
-const SCREENSHOT_RESOLUTION: [u32; 2] = [3840, 2160];

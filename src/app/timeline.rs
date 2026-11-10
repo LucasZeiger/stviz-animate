@@ -1,8 +1,9 @@
 //! The bottom timeline bar.
 
 use super::{
-    util::obs_name, util::ObsOptions, ColorKey, EaseMode, KeyColorKind, KeyframeFilter,
-    PlaybackMode, StvizApp, MAX_FILTER_CATEGORIES,
+    util::{obs_name, ObsOptions},
+    ColorKey, EaseMode, KeyColorKind, KeyframeFilter, PlaybackMode, StvizApp,
+    MAX_FILTER_CATEGORIES,
 };
 use crate::data::Dataset;
 use eframe::egui;
@@ -543,10 +544,10 @@ impl StvizApp {
         if let (Some(drag_idx), Some(pos)) = (self.dragging_key_idx, pointer_pos) {
             if let Some((target_idx, target_rect, insert_after)) = card_rects
                 .iter()
-                .filter_map(|(idx, rect)| {
+                .map(|(idx, rect)| {
                     let center = rect.center();
                     let dist = (center.x - pos.x).powi(2) + (center.y - pos.y).powi(2);
-                    Some((*idx, *rect, dist))
+                    (*idx, *rect, dist)
                 })
                 .min_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal))
                 .map(|(idx, rect, _)| (idx, rect, pos.x > rect.center().x))

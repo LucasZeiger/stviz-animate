@@ -170,8 +170,8 @@ impl StvizApp {
             filterable: filterable_opts,
             continuous: continuous_opts,
         } = ds_opt
-            .as_ref()
-            .map(|ds| ObsOptions::for_dataset(ds))
+            .as_deref()
+            .map(ObsOptions::for_dataset)
             .unwrap_or_default();
 
         let default_card_size = egui::vec2(220.0, 150.0);

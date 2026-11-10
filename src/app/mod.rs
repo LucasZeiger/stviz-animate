@@ -27,6 +27,7 @@ mod style;
 mod timeline;
 mod util;
 mod viewport;
+mod window;
 mod workspace;
 
 const MAX_FILTER_CATEGORIES: usize = 5000;

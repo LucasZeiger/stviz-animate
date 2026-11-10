@@ -485,10 +485,6 @@ Then add that path to your system environment variables (PATH).";
             venv_dir.join("bin").join("python")
         }
     }
-
-    pub(super) fn is_wsl() -> bool {
-        std::env::var_os("WSL_DISTRO_NAME").is_some() || std::env::var_os("WSL_INTEROP").is_some()
-    }
 }
 
 const MIN_PYTHON_VERSION: (u32, u32) = (3, 8);

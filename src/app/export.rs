@@ -16,6 +16,9 @@ use std::{
     process::{Command, Stdio},
 };
 
+/// Output size of the "Screenshot" button.
+pub(super) const SCREENSHOT_RESOLUTION: [u32; 2] = [3840, 2160];
+
 impl StvizApp {
     fn run_python_cv2_export(&mut self, frames_dir: &Path, out_path: &Path) -> Result<(), String> {
         let script = self.project_dir.join("python").join("export_video_cv2.py");

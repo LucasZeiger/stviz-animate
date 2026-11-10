@@ -97,22 +97,47 @@ pub(super) struct ObsOptions {
 
 impl ObsOptions {
     pub(super) fn for_dataset(ds: &Dataset) -> Self {
-        let mut out = Self::default();
-        for (i, o) in ds.meta.obs.iter().enumerate() {
-            match o {
-                ObsMeta::Categorical {
-                    name, categories, ..
-                } => {
-                    out.categorical.push((i, name.clone()));
-                    if categories.len() <= MAX_FILTER_CATEGORIES {
-                        out.filterable.push((i, name.clone()));
-                    }
-                }
-                ObsMeta::Continuous { name, .. } => out.continuous.push((i, name.clone())),
-            }
+        Self {
+            categorical: categorical_obs(ds),
+            filterable: filterable_obs(ds),
+            continuous: continuous_obs(ds),
         }
-        out
     }
+}
+
+fn obs_where(ds: &Dataset, keep: impl Fn(&ObsMeta) -> Option<&String>) -> Vec<(usize, String)> {
+    ds.meta
+        .obs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, o)| keep(o).map(|name| (i, name.clone())))
+        .collect()
+}
+
+/// Categorical obs columns as `(obs index, name)`.
+pub(super) fn categorical_obs(ds: &Dataset) -> Vec<(usize, String)> {
+    obs_where(ds, |o| match o {
+        ObsMeta::Categorical { name, .. } => Some(name),
+        _ => None,
+    })
+}
+
+/// Categorical obs columns small enough to filter on (`<= MAX_FILTER_CATEGORIES`).
+pub(super) fn filterable_obs(ds: &Dataset) -> Vec<(usize, String)> {
+    obs_where(ds, |o| match o {
+        ObsMeta::Categorical {
+            name, categories, ..
+        } if categories.len() <= MAX_FILTER_CATEGORIES => Some(name),
+        _ => None,
+    })
+}
+
+/// Continuous obs columns as `(obs index, name)`.
+pub(super) fn continuous_obs(ds: &Dataset) -> Vec<(usize, String)> {
+    obs_where(ds, |o| match o {
+        ObsMeta::Continuous { name, .. } => Some(name),
+        _ => None,
+    })
 }
 
 #[cfg(test)]

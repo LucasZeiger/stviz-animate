@@ -30,7 +30,7 @@
 - UI strings: keep labels concise and consistent (e.g., "Open .stviz", "Apply gene").
 
 ## Testing Guidelines
-- Unit tests live next to the code (`src/app/mod.rs`, `src/app/util.rs`); run them with `cargo test`.
+- Unit tests live in a `#[cfg(test)] mod tests` next to the code they cover (e.g. `src/app/util.rs`); run them with `cargo test`.
 - For UI changes, run the app and validate interactions (timeline, filters, gene coloring).
 - If adding tests, prefer module-level tests in the relevant `src/*.rs` file.
 
