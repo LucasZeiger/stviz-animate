@@ -263,3 +263,79 @@ pub(super) fn chrono_like_timestamp() -> String {
         .as_millis();
     format!("{ms}")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const EASES: [EaseMode; 4] = [
+        EaseMode::Linear,
+        EaseMode::Smoothstep,
+        EaseMode::SineInOut,
+        EaseMode::QuadInOut,
+    ];
+
+    #[test]
+    fn apply_ease_hits_endpoints_and_midpoint() {
+        for mode in EASES {
+            assert!(apply_ease(0.0, mode).abs() < 1e-6, "{mode:?} at 0");
+            assert!((apply_ease(1.0, mode) - 1.0).abs() < 1e-6, "{mode:?} at 1");
+            assert!(
+                (apply_ease(0.5, mode) - 0.5).abs() < 1e-6,
+                "{mode:?} at 0.5"
+            );
+        }
+    }
+
+    #[test]
+    fn apply_ease_clamps_input() {
+        for mode in EASES {
+            assert_eq!(apply_ease(-1.0, mode), apply_ease(0.0, mode));
+            assert_eq!(apply_ease(2.0, mode), apply_ease(1.0, mode));
+        }
+    }
+
+    #[test]
+    fn export_phase_to_t_handles_modes_and_direction() {
+        assert_eq!(export_phase_to_t(0.25, PlaybackMode::Loop, 1.0), 0.25);
+        assert_eq!(export_phase_to_t(1.25, PlaybackMode::Loop, 1.0), 0.25);
+        assert_eq!(export_phase_to_t(0.25, PlaybackMode::Loop, -1.0), 0.75);
+        assert_eq!(export_phase_to_t(0.25, PlaybackMode::PingPong, 1.0), 0.5);
+        assert_eq!(export_phase_to_t(0.75, PlaybackMode::PingPong, 1.0), 0.5);
+        assert_eq!(export_phase_to_t(0.5, PlaybackMode::PingPong, 1.0), 1.0);
+    }
+
+    #[test]
+    fn color32_from_packed_round_trips_pack_rgba8() {
+        let c = color32_from_packed(pack_rgba8(10, 20, 30, 255));
+        assert_eq!((c.r(), c.g(), c.b(), c.a()), (10, 20, 30, 255));
+    }
+
+    #[test]
+    fn contrast_color_picks_readable_text() {
+        assert_eq!(contrast_color(egui::Color32::BLACK), egui::Color32::WHITE);
+        assert_eq!(contrast_color(egui::Color32::WHITE), egui::Color32::BLACK);
+    }
+
+    #[test]
+    fn format_scale_value_switches_to_scientific_outside_range() {
+        assert_eq!(format_scale_value(0.0), "0.000");
+        assert_eq!(format_scale_value(1.5), "1.500");
+        assert_eq!(format_scale_value(12345.0), "1.23e4");
+        assert_eq!(format_scale_value(0.001), "1.00e-3");
+    }
+
+    #[test]
+    fn constrain_card_pos_keeps_card_inside_canvas_and_off_inspector() {
+        let canvas = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let far_away = egui::Rect::from_min_size(egui::pos2(1000.0, 1000.0), egui::vec2(1.0, 1.0));
+        let size = egui::vec2(100.0, 50.0);
+
+        let clamped = constrain_card_pos(egui::pos2(-20.0, 500.0), size, canvas, far_away);
+        assert_eq!(clamped, egui::pos2(0.0, 250.0));
+
+        let inspector = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(150.0, 100.0));
+        let moved = constrain_card_pos(egui::pos2(10.0, 10.0), size, canvas, inspector);
+        assert_eq!(moved, egui::pos2(10.0, 112.0));
+    }
+}

@@ -31,7 +31,11 @@ Key runtime goals:
 
 ## Repository layout
 - `src/` Rust application code.
-  - `app.rs`: UI, state, timeline, export logic, and main app orchestration.
+  - `app/`: the egui application, split by concern. `mod.rs` holds the `StvizApp` state, setup and the per-frame `update` loop; every other file adds an `impl StvizApp` block for one area:
+    - `left_panel.rs`, `timeline.rs`, `advanced.rs`, `viewport.rs`: the four UI regions (settings panel, bottom timeline, advanced node editor, central view).
+    - `dataset.rs`, `keyframes.rs`, `layout.rs`: loading data, color/filter recomputation, keyframe bookkeeping, bounding boxes and the sample grid.
+    - `export.rs`, `convert.rs`, `env.rs`: video/screenshot export, `.h5ad` conversion and mock data, and locating Python/ffmpeg/app directories.
+    - `workspace.rs`, `input.rs`, `render_callback.rs`, `util.rs`: workspace save/restore, hotkeys and playback ticking, the wgpu paint callback, and small shared helpers.
   - `render.rs`: WGPU pipeline and point cloud rendering.
   - `data.rs`: `.stviz` loader, memory mapping, metadata parsing.
   - `camera.rs`: 2D camera controls (pan, zoom, fit bbox).
@@ -276,8 +280,8 @@ GPU selection:
 
 ## Extension points
 Common areas to modify:
-- Add new export options: `start_export_loop` and `finish_export_loop` in `src/app.rs`.
-- Add new color modes: `ColorMode` enum and `colors_for_key` in `src/app.rs`.
+- Add new export options: `start_export_loop` and `finish_export_loop` in `src/app/export.rs`.
+- Add new color modes: `ColorMode` enum in `src/app/mod.rs` and `colors_for_key` in `src/app/keyframes.rs`.
 - Modify shader rendering: `assets/pointcloud.wgsl`.
 - Adjust file format: `python/export_stviz.py` and `src/data.rs`.
 
