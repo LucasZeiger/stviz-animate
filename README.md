@@ -87,7 +87,8 @@ Requires Python 3.8+ (Python 3.10+ recommended).
 - Loop export: writes frames under `<user-data>/output/exports/` and MP4 output under `<user-data>/output/`.
 - Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
 - `ffmpeg` is preferred if available on the user system. If missing, OpenCV fallback is auto-installed in the managed converter venv on first use.
-- If `ffmpeg` is missing, the app can also attempt a best-effort first-run install via system package manager (internet required; admin rights may be required depending on OS policy).
+- If `ffmpeg` is missing, the Output panel offers an opt-in install via the system package manager (winget/choco, brew, or apt/dnf/pacman/zypper). It is off by default; internet access and possibly admin rights are required.
+- Encoding, the OpenCV fallback and the ffmpeg install run in the background, so the app stays responsive and **Cancel export** stops them.
 
 ## Packaging
 Scripts to produce portable bundles:

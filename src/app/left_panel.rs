@@ -2,6 +2,7 @@
 
 use super::{
     export::SCREENSHOT_RESOLUTION,
+    export_job::ExportJobKind,
     util::{
         categorical_obs, chrono_like_timestamp, color32_from_packed, continuous_obs,
         format_scale_value, obs_name,
@@ -1018,8 +1019,9 @@ impl StvizApp {
     /// Screenshot and video export controls and the export log.
     fn ui_output_section(&mut self, ui: &mut egui::Ui) {
         ui.separator();
+        let busy = self.export_busy();
         let mut output_frame = egui::Frame::group(ui.style()).inner_margin(egui::Margin::same(6));
-        if self.exporting_loop {
+        if busy {
             output_frame = output_frame
                 .fill(egui::Color32::from_rgb(40, 60, 90))
                 .stroke(egui::Stroke::new(
@@ -1028,7 +1030,7 @@ impl StvizApp {
                 ));
         }
         output_frame.show(ui, |ui| {
-            if self.exporting_loop {
+            if busy {
                 ui.colored_label(egui::Color32::from_rgb(230, 240, 255), "Output (busy)");
             } else {
                 ui.label("Output");
@@ -1160,19 +1162,30 @@ impl StvizApp {
             {
                 self.refresh_ffmpeg_path();
             }
-            ui.checkbox(
-                &mut self.ffmpeg_auto_install,
-                "Auto-install ffmpeg if missing (best effort)",
-            );
+            let installing = self.export_job_kind() == Some(ExportJobKind::InstallFfmpeg);
             if self.export_run_ffmpeg && !self.ffmpeg_available {
-                ui.colored_label(
-                    egui::Color32::YELLOW,
-                    "ffmpeg not found (will try OpenCV fallback).",
+                if installing {
+                    ui.colored_label(egui::Color32::YELLOW, "Installing ffmpeg...");
+                } else {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "ffmpeg not found (will try OpenCV fallback).",
+                    );
+                }
+                ui.checkbox(
+                    &mut self.ffmpeg_auto_install,
+                    "Install ffmpeg during export if missing",
+                )
+                .on_hover_text(
+                    "Uses the system package manager (winget, choco, brew, apt, dnf, pacman or \
+                     zypper). Needs internet access and may need admin rights.",
                 );
-                if self.ffmpeg_auto_install && ui.button("Retry ffmpeg install now").clicked() {
-                    self.ffmpeg_auto_install_attempted = false;
-                    let _ = self.try_auto_install_ffmpeg();
-                    self.refresh_ffmpeg_path();
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Install ffmpeg now"))
+                    .on_hover_text("Runs the system package manager in the background.")
+                    .clicked()
+                {
+                    self.start_ffmpeg_install();
                 }
             }
             let keep_forced = !self.export_run_ffmpeg;
@@ -1191,23 +1204,29 @@ impl StvizApp {
             {
                 self.export_keep_frames = keep_pref;
             }
+            let export_label = match self.export_job_kind() {
+                Some(ExportJobKind::Encode) => "Encoding...",
+                _ if busy && !installing => "Exporting...",
+                _ => "Export loop video",
+            };
             if ui
-                .button(if self.exporting_loop {
-                    "Exporting..."
-                } else {
-                    "Export loop video"
-                })
+                .add_enabled(!busy, egui::Button::new(export_label))
                 .clicked()
             {
                 self.start_export_loop();
             }
-            if (self.exporting_loop || self.export_finishing)
-                && ui.button("Cancel export").clicked()
-            {
-                self.cancel_export_loop();
+            if busy {
+                let cancel_label = if installing {
+                    "Cancel install"
+                } else {
+                    "Cancel export"
+                };
+                if ui.button(cancel_label).clicked() {
+                    self.cancel_export_loop();
+                }
             }
             if let Some(status) = self.export_status.as_ref() {
-                if self.exporting_loop {
+                if busy {
                     ui.colored_label(egui::Color32::from_rgb(240, 200, 90), status);
                 } else {
                     ui.label(status);

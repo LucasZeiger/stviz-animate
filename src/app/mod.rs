@@ -18,6 +18,7 @@ mod convert;
 mod dataset;
 mod env;
 mod export;
+mod export_job;
 mod input;
 mod keyframes;
 mod layout;
@@ -54,6 +55,17 @@ enum ExportEncodingSpeed {
     Balanced,
     #[default]
     SmallestFile,
+}
+
+impl ExportVideoQuality {
+    /// libx264 constant rate factor (lower is higher quality).
+    fn crf(self) -> u32 {
+        match self {
+            Self::Standard => 23,
+            Self::High => 18,
+            Self::Ultra => 14,
+        }
+    }
 }
 
 impl ExportEncodingSpeed {
@@ -151,6 +163,8 @@ pub struct StvizApp {
     export_keep_frames: bool,
     export_camera: Option<Camera2D>,
     direct_video_export: Option<DirectVideoExport>,
+    /// Background encode or ffmpeg install; see `export_job`.
+    export_job: Option<export_job::ExportJob>,
     export_pending_frames: u32,
     export_finishing: bool,
     export_cancelled: bool,
@@ -525,12 +539,14 @@ impl StvizApp {
             export_keep_frames: false,
             export_camera: None,
             direct_video_export: None,
+            export_job: None,
             export_pending_frames: 0,
             export_finishing: false,
             export_cancelled: false,
             ffmpeg_path: ffmpeg_path.clone(),
             ffmpeg_available: ffmpeg_path.is_some(),
-            ffmpeg_auto_install: true,
+            // Off by default: installing runs the system package manager.
+            ffmpeg_auto_install: false,
             ffmpeg_auto_install_attempted: false,
             export_log_path: None,
             export_log_text: String::new(),
@@ -623,6 +639,10 @@ impl StvizApp {
 impl Drop for StvizApp {
     fn drop(&mut self) {
         self.abort_direct_video_export();
+        if let Some(job) = self.export_job.take() {
+            job.cancel();
+            let _ = job.join();
+        }
         Self::cleanup_mock_artifacts(&self.output_dir);
     }
 }
@@ -633,6 +653,7 @@ impl eframe::App for StvizApp {
         ctx.set_visuals(Self::visuals_for_theme(self.ui_theme));
         self.update_main_view_refresh(ctx, frame);
         self.handle_screenshot_events(ctx);
+        self.poll_export_job(ctx);
         self.handle_hotkeys(ctx);
         self.handle_dropped_files(ctx);
         self.poll_convert_job();

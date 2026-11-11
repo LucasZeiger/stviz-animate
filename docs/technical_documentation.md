@@ -35,6 +35,7 @@ Key runtime goals:
     - `left_panel.rs`, `timeline.rs`, `advanced.rs`, `viewport.rs`: the four UI regions (settings panel, bottom timeline, advanced node editor, central view).
     - `dataset.rs`, `keyframes.rs`, `layout.rs`: loading data, color/filter recomputation, keyframe bookkeeping, bounding boxes and the sample grid.
     - `export.rs`, `convert.rs`, `env.rs`: video/screenshot export, `.h5ad` conversion and mock data, and locating Python/ffmpeg/app directories.
+    - `export_job.rs`: the background worker for slow export steps (ffmpeg/OpenCV encoding, opt-in ffmpeg install). It reports log lines over a channel; `poll_export_job` applies them each frame.
     - `workspace.rs`, `input.rs`, `render_callback.rs`, `util.rs`: workspace save/restore, hotkeys and playback ticking, the wgpu paint callback, and small shared helpers.
     - `style.rs`, `window.rs`: categorical palettes and theme visuals; fullscreen, display refresh rate and WSL detection.
   - `render.rs`: WGPU pipeline and point cloud rendering.
@@ -281,7 +282,7 @@ GPU selection:
 
 ## Extension points
 Common areas to modify:
-- Add new export options: `start_export_loop` and `finish_export_loop` in `src/app/export.rs`.
+- Add new export options: `start_export_loop` and `finish_export_loop` in `src/app/export.rs`; anything slow that runs after the last frame belongs in `run_encode` in `src/app/export_job.rs`, not on the UI thread.
 - Add new color modes: `ColorMode` enum in `src/app/mod.rs` and `colors_for_key` in `src/app/keyframes.rs`.
 - Modify shader rendering: `assets/pointcloud.wgsl`.
 - Adjust file format: `python/export_stviz.py` and `src/data.rs`.

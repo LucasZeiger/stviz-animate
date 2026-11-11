@@ -943,7 +943,9 @@ def make_master_mock_spatial(
     if not 0.0 <= expr_density <= 1.0:
         raise ValueError("expr_density must be in [0.0, 1.0].")
     if seed is None:
-        seed = int(np.random.SeedSequence().entropy)
+        # SeedSequence().entropy is a 128-bit int, which h5py cannot store in
+        # uns["mock_params"]. Draw a 32-bit seed so it can be saved and reused.
+        seed = int(np.random.SeedSequence().generate_state(1)[0])
     rng = np.random.default_rng(seed)
 
     bounds = 1_000.0
@@ -1343,6 +1345,7 @@ def main() -> None:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     adata.write_h5ad(args.out)
     print(f"Wrote: {args.out}")
+    print(f"Seed: {adata.uns['mock_params']['seed']} (pass --seed to reproduce)")
     print(adata)
 
 

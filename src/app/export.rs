@@ -1,8 +1,12 @@
 //! Video/frame export and screenshots.
 
 use super::{
+    export_job::{
+        install_ffmpeg, remove_frames_dir, remove_temp_output, run_encode, EncodePlan, ExportJob,
+        ExportJobKind, JobOutcome,
+    },
     util::{apply_ease, chrono_like_timestamp, obs_name},
-    ColorKey, DirectVideoExport, ExportQuality, ExportVideoQuality, StvizApp,
+    ColorKey, DirectVideoExport, ExportQuality, StvizApp,
 };
 use crate::{
     camera::Camera2D,
@@ -20,138 +24,6 @@ use std::{
 pub(super) const SCREENSHOT_RESOLUTION: [u32; 2] = [3840, 2160];
 
 impl StvizApp {
-    fn run_python_cv2_export(&mut self, frames_dir: &Path, out_path: &Path) -> Result<(), String> {
-        let script = self.project_dir.join("python").join("export_video_cv2.py");
-        if !script.exists() {
-            return Err(format!("OpenCV exporter not found: {}", script.display()));
-        }
-
-        let (python_cmd, python_exe) = match Self::detect_python_cmd() {
-            Ok(cmd) => cmd,
-            Err(msg) => {
-                self.append_export_log(&msg);
-                return Err(msg);
-            }
-        };
-        let venv_dir = self.converter_venv_dir.clone();
-        let venv_python = Self::venv_python_path(&venv_dir);
-        let base_env_root = Self::python_env_root(&python_cmd);
-
-        if !venv_python.exists() {
-            self.append_export_log("Creating managed converter environment for OpenCV fallback...");
-            let mut cmd = Command::new(&python_cmd);
-            cmd.arg("-m").arg("venv").arg(&venv_dir);
-            Self::apply_python_env(&mut cmd, base_env_root.as_deref());
-            let out = cmd.output().map_err(|e| {
-                let msg = format!("Failed to create virtual environment: {e}");
-                self.append_export_log(&msg);
-                msg
-            })?;
-            if !out.status.success() {
-                let msg = "Virtual environment setup failed.".to_string();
-                self.append_export_log(&msg);
-                self.append_export_log(&String::from_utf8_lossy(&out.stdout));
-                self.append_export_log(&String::from_utf8_lossy(&out.stderr));
-                return Err(msg);
-            }
-        }
-        self.convert_last_python_exe = Some(if python_exe.is_empty() {
-            venv_python.display().to_string()
-        } else {
-            python_exe
-        });
-
-        self.append_export_log("Updating Python packaging tools...");
-        let mut bootstrap_cmd = Command::new(&venv_python);
-        bootstrap_cmd
-            .arg("-m")
-            .arg("pip")
-            .arg("install")
-            .arg("--upgrade")
-            .arg("pip")
-            .arg("setuptools")
-            .arg("wheel");
-        Self::apply_python_env(&mut bootstrap_cmd, Some(&venv_dir));
-        let bootstrap_out = bootstrap_cmd.output().map_err(|e| {
-            let msg = format!("Failed to bootstrap pip tooling: {e}");
-            self.append_export_log(&msg);
-            msg
-        })?;
-        if !bootstrap_out.status.success() {
-            let msg = "Failed to bootstrap pip tooling.".to_string();
-            self.append_export_log(&msg);
-            self.append_export_log(&String::from_utf8_lossy(&bootstrap_out.stdout));
-            self.append_export_log(&String::from_utf8_lossy(&bootstrap_out.stderr));
-            return Err(msg);
-        }
-
-        self.append_export_log("Checking OpenCV (cv2) dependency...");
-        let mut check_cmd = Command::new(&venv_python);
-        check_cmd.arg("-c").arg("import cv2");
-        Self::apply_python_env(&mut check_cmd, Some(&venv_dir));
-        let check_out = check_cmd.output().map_err(|e| {
-            let msg = format!("Failed to check OpenCV dependency: {e}");
-            self.append_export_log(&msg);
-            msg
-        })?;
-
-        if !check_out.status.success() {
-            self.append_export_log("Installing OpenCV dependency...");
-            let mut pip_cmd = Command::new(&venv_python);
-            pip_cmd
-                .arg("-m")
-                .arg("pip")
-                .arg("install")
-                .arg("--prefer-binary")
-                .arg("opencv-python-headless");
-            Self::apply_python_env(&mut pip_cmd, Some(&venv_dir));
-            let pip_out = pip_cmd.output().map_err(|e| {
-                let msg = format!("Failed to install OpenCV dependency: {e}");
-                self.append_export_log(&msg);
-                msg
-            })?;
-            if !pip_out.status.success() {
-                let msg = "OpenCV dependency install failed.".to_string();
-                self.append_export_log(&msg);
-                self.append_export_log(&String::from_utf8_lossy(&pip_out.stdout));
-                self.append_export_log(&String::from_utf8_lossy(&pip_out.stderr));
-                return Err(msg);
-            }
-        }
-
-        self.append_export_log("Encoding video with OpenCV...");
-        let mut cmd = Command::new(&venv_python);
-        cmd.arg("-X")
-            .arg("faulthandler")
-            .arg(&script)
-            .arg("--input-dir")
-            .arg(frames_dir)
-            .arg("--output")
-            .arg(out_path)
-            .arg("--fps")
-            .arg(self.export_fps.to_string());
-        cmd.env("PYTHONFAULTHANDLER", "1");
-        cmd.current_dir(&self.project_dir);
-        Self::apply_python_env(&mut cmd, Some(&venv_dir));
-        let out = cmd.output().map_err(|e| {
-            let msg = format!("Failed to run OpenCV exporter: {e}");
-            self.append_export_log(&msg);
-            msg
-        })?;
-        if !out.status.success() {
-            let msg = "OpenCV export failed.".to_string();
-            self.append_export_log(&msg);
-            self.append_export_log(&String::from_utf8_lossy(&out.stdout));
-            self.append_export_log(&String::from_utf8_lossy(&out.stderr));
-            return Err(msg);
-        }
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        if !stdout.trim().is_empty() {
-            self.append_export_log(stdout.trim());
-        }
-        Ok(())
-    }
-
     fn try_start_direct_video_export(&mut self) -> Result<bool, String> {
         if !self.export_run_ffmpeg || self.export_keep_frames {
             return Ok(false);
@@ -173,11 +45,8 @@ impl StvizApp {
             wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Rgba8UnormSrgb => "rgba",
             _ => return Ok(false),
         };
-        let (crf, output_format) = match self.export_video_quality {
-            ExportVideoQuality::Standard => (23, "yuv420p"),
-            ExportVideoQuality::High => (18, "yuv420p"),
-            ExportVideoQuality::Ultra => (14, "yuv420p"),
-        };
+        let crf = self.export_video_quality.crf();
+        let output_format = "yuv420p";
         let preset = self.export_encoding_speed.preset();
         let stderr_path = self.export_dir.join("ffmpeg_stderr.log");
         let stderr =
@@ -237,7 +106,7 @@ impl StvizApp {
     }
 
     pub(super) fn start_export_loop(&mut self) {
-        if self.exporting_loop {
+        if self.export_busy() {
             return;
         }
         if self.export_duration_sec <= 0.0 {
@@ -311,26 +180,25 @@ impl StvizApp {
         };
         self.append_export_log(&format!("Keep PNG frames: {keep_label}"));
         if self.export_run_ffmpeg {
-            if self.ffmpeg_path.is_none() && self.ffmpeg_auto_install {
-                let _ = self.try_auto_install_ffmpeg();
-            }
             let ffmpeg_label = self
                 .ffmpeg_path
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_else(|| "not found".to_string());
             self.append_export_log(&format!("ffmpeg: {}", ffmpeg_label));
-            let (crf, pix_fmt) = match self.export_video_quality {
-                ExportVideoQuality::Standard => (23, "yuv420p"),
-                ExportVideoQuality::High => (18, "yuv420p"),
-                ExportVideoQuality::Ultra => (14, "yuv420p"),
-            };
+            let crf = self.export_video_quality.crf();
             let preset = self.export_encoding_speed.preset();
             self.append_export_log(&format!(
-                "Encoding: libx264, CRF {crf}, preset {preset}, {pix_fmt}"
+                "Encoding: libx264, CRF {crf}, preset {preset}, yuv420p"
             ));
             if self.ffmpeg_path.is_none() {
-                self.append_export_log("ffmpeg missing; will try OpenCV fallback.");
+                if self.ffmpeg_auto_install && !self.ffmpeg_auto_install_attempted {
+                    self.append_export_log(
+                        "ffmpeg missing; will try to install it after frames are rendered.",
+                    );
+                } else {
+                    self.append_export_log("ffmpeg missing; will try OpenCV fallback.");
+                }
             }
         } else {
             self.append_export_log("ffmpeg disabled.");
@@ -390,188 +258,129 @@ impl StvizApp {
         }
     }
 
+    /// Hand the finished frames to a background worker for encoding, so the
+    /// UI stays responsive while ffmpeg/OpenCV run. See `export_job`.
     pub(super) fn finish_export_loop(&mut self) {
-        let frames = self.export_total_frames;
-        let frames_dir = self.export_dir.clone();
-        let final_out_path = self
+        let final_out = self
             .export_output_path
             .clone()
             .unwrap_or_else(|| self.managed_export_output_path());
-        let temp_out_path = self
+        let temp_out = self
             .export_temp_output_path
-            .clone()
-            .unwrap_or_else(|| self.managed_export_temp_path(&final_out_path));
+            .take()
+            .unwrap_or_else(|| self.managed_export_temp_path(&final_out));
         self.export_camera = None;
-        let keep_frames = self.export_keep_frames;
-        if let Some(mut direct) = self.direct_video_export.take() {
-            direct.stdin.take();
-            let result = direct.child.wait();
-            let stderr = std::fs::read_to_string(&direct.stderr_path).unwrap_or_default();
-            if !stderr.trim().is_empty() {
-                self.append_export_log("ffmpeg output:");
-                self.append_export_log(stderr.trim());
-            }
-            match result {
-                Ok(status) if status.success() => {
-                    match self.finalize_export_output(&temp_out_path, &final_out_path) {
-                        Ok(()) => {
-                            self.export_status =
-                                Some(format!("Wrote video: {}", final_out_path.display()));
-                            self.append_export_log("Direct video export succeeded.");
-                            self.remove_export_frames(&frames_dir);
-                        }
-                        Err(e) => {
-                            self.export_status = Some(format!("Export finalize failed: {e}"));
-                            self.append_export_log(&format!("Export finalize failed: {e}"));
-                            self.remove_export_output();
-                        }
-                    }
-                }
-                Ok(status) => {
-                    self.export_status = Some(format!("ffmpeg failed: {status}"));
-                    self.append_export_log(&format!("Direct ffmpeg export failed: {status}"));
-                    self.remove_export_output();
-                }
-                Err(e) => {
-                    self.export_status = Some(format!("ffmpeg wait failed: {e}"));
-                    self.append_export_log(&format!("Direct ffmpeg wait failed: {e}"));
-                    self.remove_export_output();
-                }
-            }
+        let install_ffmpeg = self.export_run_ffmpeg
+            && self.ffmpeg_path.is_none()
+            && self.ffmpeg_auto_install
+            && !self.ffmpeg_auto_install_attempted;
+        if install_ffmpeg {
+            self.ffmpeg_auto_install_attempted = true;
+        }
+        let plan = EncodePlan {
+            direct: self.direct_video_export.take(),
+            frames: self.export_total_frames,
+            frames_dir: self.export_dir.clone(),
+            temp_out,
+            final_out,
+            export_root: self.export_root_dir.clone(),
+            output_root: self.output_dir.clone(),
+            keep_frames: self.export_keep_frames,
+            run_ffmpeg: self.export_run_ffmpeg,
+            ffmpeg: self.ffmpeg_path.clone(),
+            install_ffmpeg,
+            fps: self.export_fps,
+            crf: self.export_video_quality.crf(),
+            preset: self.export_encoding_speed.preset(),
+            project_dir: self.project_dir.clone(),
+            venv_dir: self.converter_venv_dir.clone(),
+        };
+        self.export_status = Some(if plan.run_ffmpeg {
+            "Encoding video...".to_string()
+        } else {
+            "Finishing export...".to_string()
+        });
+        self.export_job = Some(ExportJob::spawn(
+            ExportJobKind::Encode,
+            move |log, cancel| run_encode(plan, log, cancel),
+        ));
+    }
+
+    /// Start the opt-in ffmpeg install in the background.
+    pub(super) fn start_ffmpeg_install(&mut self) {
+        if self.export_job.is_some() {
             return;
         }
-        if !self.export_run_ffmpeg {
-            self.export_temp_output_path = None;
-            self.export_status = Some(format!(
-                "Exported {frames} frames to {}",
-                frames_dir.display()
-            ));
-            self.append_export_log("Export finished (ffmpeg disabled).");
-            if !keep_frames {
-                self.remove_export_frames(&frames_dir);
-            }
-            return;
-        }
-
-        if let Some(ffmpeg_bin) = self.ffmpeg_path.clone() {
-            let pattern = frames_dir
-                .join("frame_%06d.png")
-                .to_string_lossy()
-                .to_string();
-            let out_str = temp_out_path.to_string_lossy().to_string();
-            let mut cmd = std::process::Command::new(&ffmpeg_bin);
-            Self::apply_subprocess_flags(&mut cmd);
-            let (crf, pix_fmt) = match self.export_video_quality {
-                ExportVideoQuality::Standard => (23, "yuv420p"),
-                ExportVideoQuality::High => (18, "yuv420p"),
-                ExportVideoQuality::Ultra => (14, "yuv420p"),
-            };
-            let preset = self.export_encoding_speed.preset();
-            let output = cmd
-                .arg("-y")
-                .arg("-framerate")
-                .arg(self.export_fps.to_string())
-                .arg("-i")
-                .arg(&pattern)
-                .arg("-c:v")
-                .arg("libx264")
-                .arg("-preset")
-                .arg(preset)
-                .arg("-crf")
-                .arg(crf.to_string())
-                .arg("-pix_fmt")
-                .arg(pix_fmt)
-                .arg(&out_str)
-                .output();
-
-            match output {
-                Ok(out) if out.status.success() => {
-                    match self.finalize_export_output(&temp_out_path, &final_out_path) {
-                        Ok(()) => {
-                            if keep_frames {
-                                self.export_status = Some(format!(
-                                    "Wrote video: {} (kept frames)",
-                                    final_out_path.display()
-                                ));
-                                self.append_export_log("Video render succeeded (frames kept).");
-                            } else {
-                                self.export_status =
-                                    Some(format!("Wrote video: {}", final_out_path.display()));
-                                self.append_export_log(
-                                    "Video render succeeded; cleaning PNG frames.",
-                                );
-                                self.remove_export_frames(&frames_dir);
-                            }
-                        }
-                        Err(e) => {
-                            self.export_status = Some(format!("Export finalize failed: {e}"));
-                            self.append_export_log(&format!("Export finalize failed: {e}"));
-                            self.remove_export_output();
-                        }
-                    }
-                }
-                Ok(out) => {
-                    let status = out.status;
-                    self.export_status = Some(format!("ffmpeg failed: {}", status));
-                    self.append_export_log(&format!("ffmpeg failed: {}", status));
-                    let stdout = String::from_utf8_lossy(&out.stdout);
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if !stdout.trim().is_empty() {
-                        self.append_export_log("ffmpeg stdout:");
-                        self.append_export_log(stdout.trim());
-                    }
-                    if !stderr.trim().is_empty() {
-                        self.append_export_log("ffmpeg stderr:");
-                        self.append_export_log(stderr.trim());
-                    }
-                    self.remove_export_output();
-                }
-                Err(e) => {
-                    self.export_status = Some(format!("ffmpeg error: {e}"));
-                    self.append_export_log(&format!("ffmpeg error: {e}"));
-                    self.remove_export_output();
-                }
-            }
-            return;
-        }
-
-        self.append_export_log("ffmpeg not found; trying OpenCV fallback.");
-        match self.run_python_cv2_export(&frames_dir, &temp_out_path) {
-            Ok(()) => match self.finalize_export_output(&temp_out_path, &final_out_path) {
-                Ok(()) => {
-                    if keep_frames {
-                        self.export_status = Some(format!(
-                            "Wrote video (OpenCV): {} (kept frames)",
-                            final_out_path.display()
-                        ));
-                        self.append_export_log("OpenCV export succeeded (frames kept).");
-                    } else {
-                        self.export_status = Some(format!(
-                            "Wrote video (OpenCV): {}",
-                            final_out_path.display()
-                        ));
-                        self.append_export_log("OpenCV export succeeded; cleaning PNG frames.");
-                        self.remove_export_frames(&frames_dir);
-                    }
-                }
-                Err(e) => {
-                    self.export_status = Some(format!("Export finalize failed: {e}"));
-                    self.append_export_log(&format!("Export finalize failed: {e}"));
-                    self.remove_export_output();
+        self.ffmpeg_auto_install_attempted = true;
+        self.export_log_open = true;
+        self.append_export_log("Installing ffmpeg...");
+        self.export_status = Some("Installing ffmpeg...".to_string());
+        let project_dir = self.project_dir.clone();
+        self.export_job = Some(ExportJob::spawn(
+            ExportJobKind::InstallFfmpeg,
+            move |log, cancel| {
+                let status = match install_ffmpeg(&project_dir, log, cancel) {
+                    Ok(Some(path)) => format!("ffmpeg ready: {}", path.display()),
+                    Ok(None) => "ffmpeg install did not complete; see the export log.".to_string(),
+                    Err(_) => "ffmpeg install cancelled.".to_string(),
+                };
+                JobOutcome {
+                    status: Some(status),
+                    ffmpeg_changed: true,
+                    ..JobOutcome::default()
                 }
             },
-            Err(e) => {
-                self.export_status = Some(format!(
-                    "Exported {frames} frames to {} (OpenCV fallback failed)",
-                    frames_dir.display()
-                ));
-                self.append_export_log(&format!("OpenCV fallback failed: {e}"));
-                self.remove_export_output();
-            }
+        ));
+    }
+
+    /// Forward worker log lines into the export log and apply the result once
+    /// the worker finishes. Called every frame from `update`.
+    pub(super) fn poll_export_job(&mut self, ctx: &egui::Context) {
+        let Some(job) = self.export_job.as_ref() else {
+            return;
+        };
+        let lines = job.drain_log();
+        let finished = job.is_finished();
+        for line in lines {
+            self.append_export_log(&line);
         }
+        if !finished {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+            return;
+        }
+        let (outcome, lines) = self.export_job.take().unwrap().join();
+        for line in lines {
+            self.append_export_log(&line);
+        }
+        if let Some(python_exe) = outcome.python_exe {
+            self.convert_last_python_exe = Some(python_exe);
+        }
+        if outcome.ffmpeg_changed {
+            self.refresh_ffmpeg_path();
+        }
+        if outcome.status.is_some() {
+            self.export_status = outcome.status;
+        }
+        ctx.request_repaint();
+    }
+
+    /// True while frames are rendering or a background export job is running.
+    pub(super) fn export_busy(&self) -> bool {
+        self.exporting_loop || self.export_finishing || self.export_job.is_some()
+    }
+
+    pub(super) fn export_job_kind(&self) -> Option<ExportJobKind> {
+        self.export_job.as_ref().map(|job| job.kind)
     }
 
     pub(super) fn cancel_export_loop(&mut self) {
+        if let Some(job) = self.export_job.as_ref() {
+            if !job.is_cancelling() {
+                job.cancel();
+                self.export_status = Some("Cancelling...".to_string());
+            }
+            return;
+        }
         if !self.exporting_loop && !self.export_finishing {
             return;
         }
@@ -590,70 +399,13 @@ impl StvizApp {
         }
     }
 
-    fn finalize_export_output(
-        &mut self,
-        temp_path: &Path,
-        final_path: &Path,
-    ) -> Result<(), String> {
-        if !Self::path_within_root(&self.export_root_dir, temp_path) {
-            return Err(format!(
-                "Refusing to finalize output outside managed export root: {}",
-                temp_path.display()
-            ));
-        }
-        if !Self::path_within_root(&self.output_dir, final_path) {
-            return Err(format!(
-                "Refusing to write output outside managed output root: {}",
-                final_path.display()
-            ));
-        }
-        if !temp_path.exists() {
-            return Err(format!(
-                "Temporary export output missing: {}",
-                temp_path.display()
-            ));
-        }
-        if let Some(parent) = final_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if final_path.exists() {
-            std::fs::remove_file(final_path)
-                .map_err(|e| format!("Failed to replace existing output file: {e}"))?;
-        }
-        std::fs::rename(temp_path, final_path)
-            .map_err(|e| format!("Failed to finalize output: {e}"))?;
-        self.export_output_path = Some(final_path.to_path_buf());
-        self.export_temp_output_path = None;
-        self.append_export_log(&format!("Finalized output: {}", final_path.display()));
-        Ok(())
-    }
-
     pub(super) fn remove_export_frames(&mut self, frames_dir: &Path) {
-        let is_loop_dir = frames_dir
-            .file_name()
-            .and_then(|s| s.to_str())
-            .map(|s| s.starts_with("loop_"))
-            .unwrap_or(false);
-        if !is_loop_dir || !Self::path_within_root(&self.export_root_dir, frames_dir) {
-            self.append_export_log(&format!(
-                "Refused to remove unmanaged frames directory: {}",
-                frames_dir.display()
-            ));
-            return;
-        }
-        if !frames_dir.exists() {
-            return;
-        }
-        if let Err(e) = std::fs::remove_dir_all(frames_dir) {
-            self.append_export_log(&format!(
-                "Failed to remove frames: {e} ({})",
-                frames_dir.display()
-            ));
-        } else {
-            self.append_export_log(&format!(
-                "Removed frames directory: {}",
-                frames_dir.display()
-            ));
+        let mut lines = Vec::new();
+        remove_frames_dir(&self.export_root_dir, frames_dir, &mut |s| {
+            lines.push(s.to_string())
+        });
+        for line in lines {
+            self.append_export_log(&line);
         }
     }
 
@@ -661,25 +413,12 @@ impl StvizApp {
         let Some(path) = self.export_temp_output_path.take() else {
             return;
         };
-        if !Self::path_within_root(&self.export_root_dir, &path) {
-            self.append_export_log(&format!(
-                "Refused to remove unmanaged temp output: {}",
-                path.display()
-            ));
-            return;
-        }
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                self.append_export_log(&format!(
-                    "Failed to remove temporary output: {e} ({})",
-                    path.display()
-                ));
-            } else {
-                self.append_export_log(&format!(
-                    "Removed temporary output file: {}",
-                    path.display()
-                ));
-            }
+        let mut lines = Vec::new();
+        remove_temp_output(&self.export_root_dir, &path, &mut |s| {
+            lines.push(s.to_string())
+        });
+        for line in lines {
+            self.append_export_log(&line);
         }
     }
 
