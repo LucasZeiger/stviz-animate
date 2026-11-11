@@ -23,6 +23,7 @@ mod input;
 mod keyframes;
 mod layout;
 mod left_panel;
+mod process;
 mod render_callback;
 mod style;
 mod timeline;
@@ -180,18 +181,19 @@ pub struct StvizApp {
     // .h5ad -> .stviz conversion
     convert_generate_only: bool,
     convert_include_expr: bool,
-    convert_input: String,
-    convert_output: String,
+    convert_expr_source: convert::ExprSource,
+    convert_layer: String,
+    convert_gene_symbols: String,
     convert_status: Option<String>,
-    convert_running: bool,
-    convert_handle: Option<std::thread::JoinHandle<Result<ConvertResult, String>>>,
+    convert_job: Option<convert::ConvertJob>,
+    /// A .stviz being opened on a worker thread; see `start_dataset_load`.
+    dataset_load: Option<dataset::DatasetLoad>,
     convert_last_python_exe: Option<String>,
     convert_log_path: Option<PathBuf>,
     convert_log_text: String,
     mock_cells: u32,
     mock_last_h5ad: Option<PathBuf>,
     mock_last_stviz: Option<PathBuf>,
-    mock_last_log: Option<PathBuf>,
 
     // UI/view settings
     ui_scale: f32,
@@ -409,13 +411,6 @@ struct AdvancedConnectionDrag {
     start_pos: egui::Pos2,
 }
 
-struct ConvertResult {
-    msg: String,
-    output: PathBuf,
-    load_after: bool,
-    python_exe: Option<String>,
-}
-
 struct DirectVideoExport {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -555,18 +550,18 @@ impl StvizApp {
 
             convert_generate_only: false,
             convert_include_expr: true,
-            convert_input: String::new(),
-            convert_output: String::new(),
+            convert_expr_source: convert::ExprSource::X,
+            convert_layer: String::new(),
+            convert_gene_symbols: String::new(),
             convert_status: None,
-            convert_running: false,
-            convert_handle: None,
+            convert_job: None,
+            dataset_load: None,
             convert_last_python_exe: None,
             convert_log_path: None,
             convert_log_text: String::new(),
             mock_cells: 300_000,
             mock_last_h5ad: None,
             mock_last_stviz: None,
-            mock_last_log: None,
 
             ui_scale: 1.0,
             ui_theme: UiTheme::Dark,
@@ -639,6 +634,9 @@ impl StvizApp {
 impl Drop for StvizApp {
     fn drop(&mut self) {
         self.abort_direct_video_export();
+        if let Some(job) = self.convert_job.take() {
+            job.abort();
+        }
         if let Some(job) = self.export_job.take() {
             job.cancel();
             let _ = job.join();
@@ -657,9 +655,7 @@ impl eframe::App for StvizApp {
         self.handle_hotkeys(ctx);
         self.handle_dropped_files(ctx);
         self.poll_convert_job();
-        if self.convert_running {
-            self.refresh_convert_log();
-        }
+        self.poll_dataset_load();
         self.maybe_update_playback(ctx);
         let render_prepare_err = { self.shared.last_prepare_error.lock().take() };
         if let Some(err) = render_prepare_err {
@@ -725,7 +721,7 @@ impl eframe::App for StvizApp {
         });
         self.ui_advanced_timeline(ctx);
 
-        if self.convert_running {
+        if self.convert_running() || self.dataset_load.is_some() {
             ctx.request_repaint_after(self.main_view_frame_interval());
         }
     }

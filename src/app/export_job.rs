@@ -5,21 +5,19 @@
 //! The worker reports progress as log lines over a channel and returns a
 //! [`JobOutcome`]; [`StvizApp::poll_export_job`] picks both up each frame.
 
-use super::{DirectVideoExport, StvizApp};
+use super::{
+    process::{run_cancellable, wait_cancellable, RunError},
+    DirectVideoExport, StvizApp,
+};
 use std::{
-    io::Read,
     path::{Path, PathBuf},
-    process::{Child, Command, ExitStatus, Stdio},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc,
     },
     thread::JoinHandle,
-    time::Duration,
 };
-
-/// How often a worker checks a running subprocess for exit or cancellation.
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ExportJobKind {
@@ -128,17 +126,6 @@ pub(super) struct EncodePlan {
     pub(super) preset: &'static str,
     pub(super) project_dir: PathBuf,
     pub(super) venv_dir: PathBuf,
-}
-
-pub(super) enum RunError {
-    Cancelled,
-    Failed(String),
-}
-
-impl From<String> for RunError {
-    fn from(msg: String) -> Self {
-        Self::Failed(msg)
-    }
 }
 
 /// Encode the finished frames (or wait for the streaming ffmpeg) and move the
@@ -270,6 +257,9 @@ fn encode_png_frames_ffmpeg(
         .arg(plan.fps.to_string())
         .arg("-i")
         .arg(&pattern)
+        // yuv420p needs even dimensions; a viewport-sized capture may be odd.
+        .arg("-vf")
+        .arg("crop=trunc(iw/2)*2:trunc(ih/2)*2")
         .arg("-c:v")
         .arg("libx264")
         .arg("-preset")
@@ -504,59 +494,6 @@ fn ffmpeg_installers() -> &'static [Installer] {
     }
 }
 
-struct ProcessOutput {
-    status: ExitStatus,
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-}
-
-/// Like `Command::output`, but kills the process if `cancel` is set.
-fn run_cancellable(cmd: &mut Command, cancel: &AtomicBool) -> Result<ProcessOutput, RunError> {
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| RunError::Failed(e.to_string()))?;
-    // Drain both pipes on their own threads so a chatty process can't fill a
-    // pipe buffer and stall while we wait for it.
-    let stdout = child.stdout.take().map(read_all_in_background);
-    let stderr = child.stderr.take().map(read_all_in_background);
-    let status = wait_cancellable(&mut child, cancel);
-    let collect =
-        |h: Option<JoinHandle<Vec<u8>>>| h.and_then(|h| h.join().ok()).unwrap_or_default();
-    let stdout = collect(stdout);
-    let stderr = collect(stderr);
-    Ok(ProcessOutput {
-        status: status?,
-        stdout,
-        stderr,
-    })
-}
-
-fn read_all_in_background<R: Read + Send + 'static>(mut pipe: R) -> JoinHandle<Vec<u8>> {
-    std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = pipe.read_to_end(&mut buf);
-        buf
-    })
-}
-
-fn wait_cancellable(child: &mut Child, cancel: &AtomicBool) -> Result<ExitStatus, RunError> {
-    loop {
-        if cancel.load(Ordering::Relaxed) {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(RunError::Cancelled);
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status),
-            Ok(None) => std::thread::sleep(POLL_INTERVAL),
-            Err(e) => return Err(RunError::Failed(format!("wait failed: {e}"))),
-        }
-    }
-}
-
 /// Move the temp video to its final name, refusing paths outside the managed
 /// export and output folders.
 pub(super) fn finalize_output(
@@ -648,36 +585,6 @@ pub(super) fn remove_temp_output(export_root: &Path, path: &Path, log: &mut dyn 
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn run_cancellable_captures_output() {
-        let cancel = AtomicBool::new(false);
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo out; echo err >&2; exit 3"]);
-        let Ok(out) = run_cancellable(&mut cmd, &cancel) else {
-            panic!("sh should run");
-        };
-        assert_eq!(out.status.code(), Some(3));
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
-        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "err");
-    }
-
-    #[test]
-    fn run_cancellable_kills_on_cancel() {
-        let cancel = Arc::new(AtomicBool::new(false));
-        let flag = cancel.clone();
-        let setter = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(100));
-            flag.store(true, Ordering::Relaxed);
-        });
-        let start = std::time::Instant::now();
-        let mut cmd = Command::new("sleep");
-        cmd.arg("30");
-        let result = run_cancellable(&mut cmd, &cancel);
-        setter.join().unwrap();
-        assert!(matches!(result, Err(RunError::Cancelled)));
-        assert!(start.elapsed() < Duration::from_secs(5));
-    }
 
     #[test]
     fn job_reports_log_lines_and_outcome() {

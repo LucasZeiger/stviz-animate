@@ -82,43 +82,51 @@ impl StvizApp {
     }
 
     pub(super) fn handle_dropped_files(&mut self, ctx: &egui::Context) {
-        if self.convert_running {
-            return;
-        }
         let dropped_files = ctx.input(|i| i.raw.dropped_files.clone());
-        if dropped_files.is_empty() {
+        let Some(path) = dropped_files.into_iter().find_map(|file| {
+            let path = file.path?;
+            matches!(
+                Self::lowercase_extension(&path).as_deref(),
+                Some("h5ad" | "stviz")
+            )
+            .then_some(path)
+        }) else {
+            if ctx.input(|i| !i.raw.dropped_files.is_empty()) {
+                self.convert_status = Some("Drop a .h5ad or .stviz file.".to_string());
+            }
+            return;
+        };
+        self.open_data_file(&path);
+    }
+
+    fn lowercase_extension(path: &std::path::Path) -> Option<String> {
+        path.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_ascii_lowercase())
+    }
+
+    /// Convert a .h5ad or load a .stviz, unless the app is busy with one.
+    pub(super) fn open_data_file(&mut self, path: &std::path::Path) {
+        let busy = if self.convert_running() {
+            Some("A conversion is running; wait for it or cancel it first.")
+        } else if self.dataset_load.is_some() {
+            Some("A dataset is still loading.")
+        } else if self.export_busy() {
+            Some("Finish or cancel the export before opening another dataset.")
+        } else {
+            None
+        };
+        if let Some(reason) = busy {
+            self.last_error = Some(reason.to_string());
             return;
         }
-
-        let mut handled = false;
-        for file in dropped_files {
-            if let Some(path) = file.path {
-                let ext = path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| ext.to_ascii_lowercase());
-                match ext.as_deref() {
-                    Some("h5ad") => {
-                        self.queue_h5ad_convert(&path);
-                        handled = true;
-                        break;
-                    }
-                    Some("stviz") => {
-                        if let Err(e) = self.load_dataset(&path) {
-                            let msg = format!("Load failed: {e:#}");
-                            eprintln!("{msg}");
-                            self.last_error = Some(msg);
-                        }
-                        handled = true;
-                        break;
-                    }
-                    _ => {}
-                }
+        match Self::lowercase_extension(path).as_deref() {
+            Some("h5ad") => {
+                self.last_error = None;
+                self.queue_h5ad_convert(path);
             }
-        }
-
-        if !handled {
-            self.convert_status = Some("Drop a .h5ad or .stviz file.".to_string());
+            Some("stviz") => self.start_dataset_load(path),
+            _ => self.convert_status = Some("Pick a .h5ad or .stviz file.".to_string()),
         }
     }
 

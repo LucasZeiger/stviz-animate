@@ -66,7 +66,8 @@ Then add that path to your system environment variables (PATH).";
                 .unwrap_or(0);
             if major > 0 && (major, minor) < MIN_PYTHON_VERSION {
                 return Err(format!(
-                    "`{cmd}` is Python {version}, but {}.{}+ is required for the converter scripts.",
+                    "`{cmd}` is Python {version}, but converting needs Python {}.{} or newer. \
+                     Install a newer Python and restart the app.",
                     MIN_PYTHON_VERSION.0, MIN_PYTHON_VERSION.1
                 ));
             }
@@ -92,16 +93,6 @@ Then add that path to your system environment variables (PATH).";
             }
         }
         None
-    }
-
-    pub(super) fn default_convert_output(&self, input: &str) -> PathBuf {
-        let _ = std::fs::create_dir_all(&self.output_dir);
-        let input_path = Path::new(input);
-        let stem = input_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("converted");
-        self.output_dir.join(format!("{stem}.stviz"))
     }
 
     pub(super) fn resolve_app_data_dir() -> PathBuf {
@@ -353,4 +344,5 @@ Then add that path to your system environment variables (PATH).";
     }
 }
 
-const MIN_PYTHON_VERSION: (u32, u32) = (3, 8);
+/// The converter's dependencies (anndata, numpy) no longer support older Pythons.
+const MIN_PYTHON_VERSION: (u32, u32) = (3, 9);

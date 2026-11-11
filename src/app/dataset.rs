@@ -8,11 +8,86 @@ use crate::{
     data::{Dataset, ObsMeta},
 };
 use anyhow::Context as _;
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+    thread::JoinHandle,
+};
+
+/// A .stviz being opened and validated on a worker thread.
+pub(super) struct DatasetLoad {
+    path: PathBuf,
+    handle: JoinHandle<anyhow::Result<Arc<Dataset>>>,
+}
 
 impl StvizApp {
-    pub(super) fn load_dataset(&mut self, path: &Path) -> anyhow::Result<()> {
-        let ds = Dataset::load(path).context("load dataset")?;
+    /// Open a .stviz without blocking the UI; `poll_dataset_load` finishes it.
+    pub(super) fn start_dataset_load(&mut self, path: &Path) {
+        if self.export_busy() {
+            self.last_error =
+                Some("Finish or cancel the export before opening another dataset.".to_string());
+            return;
+        }
+        if self.dataset_load.is_some() {
+            self.last_error = Some("Another dataset is still loading.".to_string());
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        self.convert_status = Some(format!("Loading {name}..."));
+        self.last_error = None;
+        let path = path.to_path_buf();
+        let worker_path = path.clone();
+        self.dataset_load = Some(DatasetLoad {
+            path,
+            handle: std::thread::spawn(move || Dataset::load(&worker_path)),
+        });
+    }
+
+    pub(super) fn poll_dataset_load(&mut self) {
+        if !self
+            .dataset_load
+            .as_ref()
+            .is_some_and(|load| load.handle.is_finished())
+        {
+            return;
+        }
+        let load = self.dataset_load.take().unwrap();
+        let result = match load.handle.join() {
+            Ok(Ok(ds)) => self.install_dataset(ds, &load.path),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(anyhow::anyhow!("the loader stopped unexpectedly")),
+        };
+        match result {
+            Ok(()) => {
+                self.convert_status = Some(format!("Loaded dataset: {}", load.path.display()));
+            }
+            Err(e) => {
+                let msg = format!("Load failed: {e:#}");
+                eprintln!("{msg}");
+                self.convert_status = None;
+                self.last_error = Some(msg);
+            }
+        }
+    }
+
+    /// Close the current dataset and release its file.
+    pub(super) fn unload_dataset(&mut self) {
+        self.dataset = None;
+        self.dataset_path = None;
+        self.dataset_id = self.dataset_id.wrapping_add(1);
+        self.shared.params.lock().dataset = None;
+        self.base_indices.clear();
+        self.draw_indices = Arc::new(Vec::new());
+        self.indices_id = self.indices_id.wrapping_add(1);
+        self.playing = false;
+    }
+
+    /// Make an already opened dataset the current one and reset the view,
+    /// timeline, colors and filters to their defaults for it.
+    pub(super) fn install_dataset(&mut self, ds: Arc<Dataset>, path: &Path) -> anyhow::Result<()> {
         self.dataset = Some(ds.clone());
         self.dataset_path = Some(path.to_path_buf());
         self.open_path = path.display().to_string();
@@ -168,6 +243,12 @@ impl StvizApp {
         }
 
         Ok(())
+    }
+
+    /// Open a .stviz and make it current, blocking until it is loaded.
+    pub(super) fn load_dataset(&mut self, path: &Path) -> anyhow::Result<()> {
+        let ds = Dataset::load(path).context("load dataset")?;
+        self.install_dataset(ds, path)
     }
 
     pub(super) fn recompute_colors_and_filters(&mut self) -> anyhow::Result<()> {

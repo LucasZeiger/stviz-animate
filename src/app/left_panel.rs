@@ -1,6 +1,7 @@
 //! The left-hand settings panel.
 
 use super::{
+    convert::ExprSource,
     export::SCREENSHOT_RESOLUTION,
     export_job::ExportJobKind,
     util::{
@@ -59,14 +60,14 @@ impl StvizApp {
         });
         ui.horizontal(|ui| {
             let generate = ui.add_enabled(
-                !self.convert_running,
+                !self.convert_running(),
                 egui::Button::new("Generate mock dataset"),
             );
             if generate.clicked() {
                 self.start_mock_dataset();
             }
             let regen = ui.add_enabled(
-                !self.convert_running && self.mock_last_h5ad.is_some(),
+                !self.convert_running() && self.mock_last_h5ad.is_some(),
                 egui::Button::new("Regenerate mock dataset"),
             );
             if regen.clicked() {
@@ -80,12 +81,42 @@ impl StvizApp {
             &mut self.convert_include_expr,
             "Include gene expression data (uncheck for smaller file size)",
         );
+        if self.convert_include_expr {
+            egui::CollapsingHeader::new("Expression source")
+                .id_salt("convert_expr_source")
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.radio_value(&mut self.convert_expr_source, ExprSource::X, "X")
+                            .on_hover_text("Use adata.X (default).");
+                        ui.radio_value(&mut self.convert_expr_source, ExprSource::Raw, "raw")
+                            .on_hover_text("Use adata.raw.X and its gene names.");
+                        ui.radio_value(&mut self.convert_expr_source, ExprSource::Layer, "layer")
+                            .on_hover_text("Use one of adata.layers.");
+                    });
+                    if self.convert_expr_source == ExprSource::Layer {
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.convert_layer)
+                                .desired_width(200.0)
+                                .hint_text("Layer name, e.g. counts"),
+                        );
+                    }
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.convert_gene_symbols)
+                            .desired_width(200.0)
+                            .hint_text("Gene name column in var (optional)"),
+                    )
+                    .on_hover_text(
+                        "Use this var column for gene names instead of the var index, \
+                         e.g. gene_symbols.",
+                    );
+                });
+        }
         ui.checkbox(
             &mut self.convert_generate_only,
             "Generate .stviz file only - don't load",
         );
         if let Some(status) = self.convert_status.as_ref() {
-            if self.convert_running {
+            if self.convert_running() {
                 ui.colored_label(egui::Color32::from_rgb(240, 200, 90), status);
             } else {
                 ui.label(status);
@@ -102,14 +133,14 @@ impl StvizApp {
         let visuals = ui.visuals();
         let busy_fill = egui::Color32::from_rgb(60, 90, 140);
         let busy_stroke = egui::Stroke::new(1.2_f32, egui::Color32::from_rgb(120, 170, 220));
-        let drop_fill = if self.convert_running {
+        let drop_fill = if self.convert_running() {
             busy_fill
         } else if drop_active {
             visuals.widgets.hovered.bg_fill
         } else {
             visuals.widgets.inactive.bg_fill
         };
-        let drop_stroke = if self.convert_running {
+        let drop_stroke = if self.convert_running() {
             busy_stroke
         } else if drop_active {
             visuals.widgets.hovered.bg_stroke
@@ -119,12 +150,14 @@ impl StvizApp {
         ui.painter().rect_filled(drop_rect, 6.0, drop_fill);
         ui.painter()
             .rect_stroke(drop_rect, 6.0, drop_stroke, egui::StrokeKind::Inside);
-        let drop_label = if self.convert_running {
+        let drop_label = if self.convert_running() {
             "Converting..."
+        } else if self.dataset_load.is_some() {
+            "Loading..."
         } else {
             "Drop .h5ad or .stviz anywhere (or click to pick)"
         };
-        let drop_text_color = if self.convert_running {
+        let drop_text_color = if self.convert_running() {
             egui::Color32::from_rgb(230, 240, 255)
         } else {
             visuals.text_color()
@@ -137,32 +170,18 @@ impl StvizApp {
             drop_text_color,
         );
         let drop_resp = drop_resp.on_hover_text("Drop a .h5ad to convert, or a .stviz to load.");
-        if drop_resp.clicked() && !self.convert_running {
+        if drop_resp.clicked() {
             let dialog = rfd::FileDialog::new()
                 .add_filter("h5ad", &["h5ad"])
                 .add_filter("stviz", &["stviz"])
                 .set_title("Select .h5ad or .stviz")
                 .set_directory(self.project_dir.clone());
             if let Some(path) = dialog.pick_file() {
-                match path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .map(|ext| ext.to_ascii_lowercase())
-                    .as_deref()
-                {
-                    Some("h5ad") => self.queue_h5ad_convert(&path),
-                    Some("stviz") => {
-                        if let Err(e) = self.load_dataset(&path) {
-                            let msg = format!("Load failed: {e:#}");
-                            eprintln!("{msg}");
-                            self.last_error = Some(msg);
-                        }
-                    }
-                    _ => {
-                        self.convert_status = Some("Pick a .h5ad or .stviz file.".to_string());
-                    }
-                }
+                self.open_data_file(&path);
             }
+        }
+        if self.convert_running() && ui.button("Cancel conversion").clicked() {
+            self.cancel_convert();
         }
         ui.separator();
         egui::CollapsingHeader::new("Conversion log")
@@ -175,7 +194,7 @@ impl StvizApp {
                 let max_height = row_height * 6.0 + 8.0;
                 egui::ScrollArea::vertical()
                     .max_height(max_height)
-                    .stick_to_bottom(self.convert_running)
+                    .stick_to_bottom(self.convert_running())
                     .show(ui, |ui| {
                         ui.add(
                             egui::TextEdit::multiline(&mut self.convert_log_text)
@@ -235,11 +254,7 @@ impl StvizApp {
                     self.last_error = Some("Path is empty.".to_string());
                 } else {
                     let path = PathBuf::from(self.open_path.trim());
-                    if let Err(e) = self.load_dataset(&path) {
-                        let msg = format!("Load failed: {e:#}");
-                        eprintln!("{msg}");
-                        self.last_error = Some(msg);
-                    }
+                    self.open_data_file(&path);
                 }
             }
         });

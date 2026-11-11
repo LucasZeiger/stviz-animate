@@ -576,6 +576,7 @@ def export_stviz(
     layer: Optional[str] = None,
     use_raw: bool = False,
     gene_symbols: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> None:
     input_path = Path(input_path)
     output_path = Path(output_path)
@@ -678,6 +679,8 @@ def export_stviz(
         meta = {
             "version": STVIZ_VERSION,
             "n_points": n,
+            # Where this file came from, so the app can tell conversions apart.
+            "source": source if source is not None else str(input_path.resolve()),
             "spaces": space_meta,
             "obs": obs_meta,
             "expr": expr_meta,
@@ -728,9 +731,12 @@ def main() -> int:
     src.add_argument("--layer", default=None, help="Use adata.layers[LAYER] instead of adata.X for expression.")
     src.add_argument("--use-raw", action="store_true", help="Use adata.raw.X (and raw gene names) for expression.")
     ap.add_argument("--gene-symbols", default=None, help="var column holding gene names (default: var index).")
+    ap.add_argument("--source", default=None, help="Label stored in the file to identify its origin (default: input path).")
     args = ap.parse_args()
     try:
-        export_stviz(args.input, args.output, args.include_expr, args.layer, args.use_raw, args.gene_symbols)
+        export_stviz(
+            args.input, args.output, args.include_expr, args.layer, args.use_raw, args.gene_symbols, args.source
+        )
     except ConvertError as e:
         print(f"Error: {e}", file=sys.stderr, flush=True)
         return 1

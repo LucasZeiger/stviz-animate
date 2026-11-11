@@ -97,7 +97,8 @@ impl StvizApp {
             return Ok(());
         };
 
-        self.load_dataset(&path)
+        self.open_data_file(&path);
+        Ok(())
     }
 
     fn workspace_filter(ds: &Dataset, obs_idx: usize, enabled: &[bool]) -> Option<WorkspaceFilter> {
