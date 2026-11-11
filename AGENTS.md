@@ -17,7 +17,8 @@
 - `cargo run --release` — optimized build for performance testing.
 - `cargo build --release` — produce a release binary without running.
 - `cargo fmt` — format Rust code with rustfmt (if installed).
-- `cargo test` — run tests if/when added.
+- `cargo test` — run the Rust unit tests (`cargo test -- --ignored` adds the end-to-end conversion test; needs Python and internet).
+- `python python/tests/test_export_stviz.py` — run the converter round-trip tests.
 - `python python/export_stviz.py --input file.h5ad --output file.stviz` — convert datasets manually.
 - `powershell -ExecutionPolicy Bypass -File scripts\package_windows.ps1` — Windows packaging.
 - `cargo install cargo-bundle` — install macOS packaging helper (one-time).

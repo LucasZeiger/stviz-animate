@@ -63,24 +63,40 @@ cargo run --release
 ```
 
 ## Data conversion (.h5ad -> .stviz)
-- Drag a `.h5ad` file into the app or click the conversion box to pick a file.
+- Drag a `.h5ad` file into the app or click the conversion box to pick a file. You can also start the app with a file: `stviz-animate your_data.h5ad`.
+- Progress is shown in the conversion log, and **Cancel conversion** stops it.
+- Converted files are written to `<user-data>/output/<name>.stviz`. Converting the same `.h5ad` again replaces its file; a different `.h5ad` with the same name gets a numbered file.
+- Under **Expression source** you can take gene expression from `X`, `raw` or a layer, and use a `var` column for gene names.
 - Writable runtime data lives in your user-data directory:
   - Windows: `%APPDATA%/stviz-animate/`
   - macOS: `~/Library/Application Support/stviz-animate/`
   - Linux: `${XDG_DATA_HOME:-~/.local/share}/stviz-animate/`
 - The app creates and uses a managed venv at `<user-data>/.stviz_venv` for conversion and OpenCV fallback.
 - A system Python install is still required so the app can create that managed venv.
-- On first conversion/export-fallback run, dependencies are silently installed from `python/requirements.txt` (internet required).
+- On first conversion/export-fallback run, dependencies are installed from `python/requirements.txt` (internet required). Later conversions work offline.
+
+What gets converted:
+- Every `.obsm` entry with at least two numeric columns becomes a space (the first two dimensions are used). Cells with missing coordinates are not drawn.
+- Categorical, string and boolean `.obs` columns become categorical fields; numeric columns become continuous fields. Integer columns with up to 50 distinct values (e.g. cluster ids) are available as both.
+- Per-cell identifier columns such as barcodes are skipped.
+- The expression matrix is streamed, so memory use stays low even for large files.
 
 Manual conversion:
 
 ```bash
 python -m pip install --upgrade pip setuptools wheel
 python -m pip install -r python/requirements.txt
-python python/export_stviz.py --input your_data.h5ad --output your_data.stviz
+python python/export_stviz.py --input your_data.h5ad --output your_data.stviz --include-expr
 ```
 
-Requires Python 3.8+ (Python 3.10+ recommended).
+Optional flags: `--layer NAME` or `--use-raw` to choose the expression matrix, and `--gene-symbols COLUMN` to take gene names from a `var` column.
+
+Requires Python 3.9+ (Python 3.10+ recommended).
+
+## Workspaces and settings
+- **Save workspace** stores the timeline (including the advanced timeline layout), colors, filters, view and export settings in a `.workspace.json` file.
+- A workspace finds its dataset at the saved path or, failing that, next to the workspace file, so the two can be moved or shared together.
+- Appearance, the last used folder and recent datasets are remembered between launches in `<user-data>/settings.json`.
 
 ## Export
 - Screenshot: saves a PNG to `<user-data>/output/screenshots/` at 4K (3840x2160).

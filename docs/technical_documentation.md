@@ -1,6 +1,6 @@
 # stviz-animate Technical Documentation
 
-Last updated: 2026-02-14
+Last updated: 2026-11-11
 
 ## Table of contents
 - Overview
@@ -37,6 +37,7 @@ Key runtime goals:
     - `export.rs`, `convert.rs`, `env.rs`: video/screenshot export, `.h5ad` conversion and mock data, and locating Python/ffmpeg/app directories.
     - `export_job.rs`: the background worker for slow export steps (ffmpeg/OpenCV encoding, opt-in ffmpeg install). It reports log lines over a channel; `poll_export_job` applies them each frame.
     - `workspace.rs`, `input.rs`, `render_callback.rs`, `util.rs`: workspace save/restore, hotkeys and playback ticking, the wgpu paint callback, and small shared helpers.
+    - `settings.rs`, `process.rs`: preferences persisted between launches, and cancellable subprocess helpers (captured or line-streamed output) used by the conversion and export workers.
     - `style.rs`, `window.rs`: categorical palettes and theme visuals; fullscreen, display refresh rate and WSL detection.
   - `render.rs`: WGPU pipeline and point cloud rendering.
   - `data.rs`: `.stviz` loader, memory mapping, metadata parsing.
@@ -68,7 +69,7 @@ cargo run --release
 Dependencies:
 - Rust toolchain.
 - GPU drivers for accelerated rendering.
-- Python 3.8+ for conversion and optional OpenCV fallback export.
+- Python 3.9+ for conversion and optional OpenCV fallback export.
 - Converter dependencies are specified in `python/requirements.txt` with versions chosen for broad wheel availability.
 
 ## Data format (.stviz)
@@ -107,12 +108,18 @@ Expression metadata (`ExprMeta`):
 
 ## Data conversion pipeline
 ### `.h5ad` to `.stviz` (`python/export_stviz.py`)
-- Reads `AnnData` via `anndata`.
-- Extracts 2D spaces from `.obsm` (e.g., `X_umap`, `X_tsne`, `spatial`).
+- Opens the file with `h5py` and reads only `obs`, the first two columns of each `.obsm` entry, the `*_colors` palettes and gene names (via `anndata`'s element readers). The full `AnnData` is never loaded.
+- Spaces: every `.obsm` entry with at least two numeric columns (e.g., `X_umap`, `X_pca`, `spatial`); the first two dimensions are used. Non-finite coordinates are stored as NaN (not drawn) and left out of the bbox.
 - Falls back to `obs` columns (`x/y`, `spatial_x/spatial_y`, etc.) if needed.
-- Collects categorical obs (categories + labels + optional scanpy palette).
-- Collects continuous obs (float values).
-- Optionally exports gene expression as CSC for fast gene lookup.
+- Categorical obs: categorical, string and boolean columns (categories + labels + optional scanpy palette; `#RGB`, `#RRGGBB(AA)`, common names and RGB(A) tuples are understood). Columns that look like per-cell ids (more than half the cells distinct) are skipped.
+- Continuous obs: numeric columns (float values, NaN for missing). Integer columns with at most 50 distinct values are exported as categorical as well.
+- Optionally exports gene expression as CSC for fast gene lookup. The source matrix (`X`, `--use-raw`, or `--layer`; CSR, CSC or dense on disk) is streamed in chunks in two passes (count per gene, then fill) directly into the output file. More than `u32::MAX` non-zeros or cells is reported as an error.
+- The output is written to `<output>.partial` and renamed into place, so an existing `.stviz` (possibly memory-mapped by the app) is never modified in place.
+- The metadata records `source` (the input path) so the app can tell which `.h5ad` a file came from.
+
+In the app (`src/app/convert.rs`) conversion runs as a `ConvertJob` on a worker thread: it creates the managed venv and installs dependencies only when missing, streams script output into the conversion log, and can be cancelled (the subprocess is killed and partial output removed). `.stviz` files are opened and validated on a worker thread too (`start_dataset_load` in `src/app/dataset.rs`).
+
+Tests: `python python/tests/test_export_stviz.py` (round trips for CSR/CSC/dense, layers, raw, column typing and error handling), and `cargo test -- --ignored` for an end-to-end mock generation + conversion (needs Python and internet).
 
 ### Mock dataset generation (`python/mock_spatial_dataset.py`)
 - Generates synthetic spatial and embedding spaces.
@@ -196,6 +203,7 @@ Color modes:
 - Categorical: per-category palette with optional overrides.
 - Continuous: gradient palette based on numeric values.
 - Gene: gene expression coloring (if `expr` is present).
+- "Clip outliers (1-99%)" maps continuous and gene colors onto the 1st-99th percentile range (for genes, the 99th percentile of expressing cells) instead of the full min/max.
 
 Filtering:
 - Filters are applied immediately when categories are toggled.
@@ -273,10 +281,23 @@ GPU selection:
 - Uses WGPU default adapter.
 - CPU adapters enable fast render mode by default.
 
+Persistent settings:
+- `<user-data>/settings.json` stores appearance, a few defaults (include expression, export fps/duration, outlier clipping, ffmpeg auto-install), the last used folder and recent datasets. It is written shortly after a change and on exit; an unreadable file falls back to defaults.
+
+Command line:
+- `stviz-animate <file.h5ad|file.stviz>` opens the file at startup.
+
+Workspaces (`src/app/workspace.rs`):
+- JSON, `version: 1`; fields added later are optional so older files still open.
+- Stores keyframes, colors, filters, view, sample grid, export settings and the advanced timeline layout (card positions, sizes, durations, connections).
+- The dataset is looked up at the saved path, then next to the workspace file by file name.
+- Opening validates the dataset and every referenced space/field before changing the current session.
+
 ## Troubleshooting
 - ffmpeg missing: ensure `ffmpeg` is on PATH or bundle it.
-- Python missing: install Python 3.8+ and add to PATH.
-- Conversion failures: check the Conversion log for dependency errors.
+- Python missing: install Python 3.9+ and add to PATH.
+- Conversion failures: the status line shows the converter's reason; the Conversion log has the details.
+- Workspace cannot find its dataset: put the `.stviz` next to the workspace file.
 - Export artifacts: verify PNG frames to isolate encoding artifacts.
 - WSL GPU: performance may be limited vs native Windows/Linux.
 
