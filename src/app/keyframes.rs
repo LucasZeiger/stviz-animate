@@ -5,7 +5,7 @@ use super::{
     MAX_FILTER_CATEGORIES,
 };
 use crate::{
-    color::{categorical_palette, gradient_map, pack_rgba8},
+    color::{categorical_palette, gene_vmax, gradient_map, pack_rgba8, value_range},
     data::Dataset,
 };
 use std::sync::Arc;
@@ -190,6 +190,20 @@ impl StvizApp {
         (seg_idx, local)
     }
 
+    /// Recolor by the selected gene. Returns false if it isn't in the dataset.
+    pub(super) fn apply_gene_colors(&mut self, ds: &Dataset, gene: &str) -> bool {
+        let Some((colors, legend, opaque)) =
+            self.compute_colors_for_key(ds, &ColorKey::Gene(gene.to_string()))
+        else {
+            return false;
+        };
+        self.colors_rgba8 = Arc::new(colors);
+        self.colors_opaque = opaque;
+        self.colors_id = self.next_color_id();
+        self.legend_range = legend;
+        true
+    }
+
     pub(super) fn compute_colors_for_key(
         &self,
         ds: &Dataset,
@@ -228,18 +242,10 @@ impl StvizApp {
             }
             ColorKey::Continuous(idx) => {
                 let (name, vals) = ds.obs_continuous(*idx).ok()?;
-                let mut vmin = f32::INFINITY;
-                let mut vmax = f32::NEG_INFINITY;
-                for &v in vals {
-                    if v.is_finite() {
-                        vmin = vmin.min(v);
-                        vmax = vmax.max(v);
-                    }
-                }
-                if !vmin.is_finite() || !vmax.is_finite() || vmin == vmax {
-                    vmin = 0.0;
-                    vmax = 1.0;
-                }
+                let (vmin, vmax) = match value_range(vals, self.clip_outliers) {
+                    Some((lo, hi)) if lo < hi => (lo, hi),
+                    _ => (0.0, 1.0),
+                };
                 let colors = gradient_map(vals, vmin, vmax, &colorous::VIRIDIS);
                 let legend = Some(LegendRange {
                     label: name.to_string(),
@@ -255,14 +261,8 @@ impl StvizApp {
                 }
                 let gid = ds.find_gene(gene)?;
                 let vec = ds.gene_vector_csc(gid).ok()?;
-                let mut vmax = 0.0f32;
-                for &v in &vec {
-                    if v.is_finite() {
-                        vmax = vmax.max(v);
-                    }
-                }
                 let vmin = 0.0;
-                let vmax = vmax.max(1e-6);
+                let vmax = gene_vmax(&vec, self.clip_outliers);
                 let colors = gradient_map(&vec, vmin, vmax, &colorous::VIRIDIS);
                 let legend = Some(LegendRange {
                     label: format!("Gene: {gene}"),

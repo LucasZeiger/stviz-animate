@@ -25,6 +25,7 @@ mod layout;
 mod left_panel;
 mod process;
 mod render_callback;
+mod settings;
 mod style;
 mod timeline;
 mod util;
@@ -36,14 +37,14 @@ const MAX_FILTER_CATEGORIES: usize = 5000;
 const MAX_GRID_CATEGORIES: usize = 512;
 const APP_DATA_DIR_NAME: &str = "stviz-animate";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ExportQuality {
     Current,
     FullHd,
     UltraHd,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum ExportVideoQuality {
     Standard,
     High,
@@ -249,6 +250,16 @@ pub struct StvizApp {
     gene_query: String,
     gene_selected: Option<String>,
 
+    /// Map continuous/gene colours onto the 1st-99th percentile range.
+    clip_outliers: bool,
+    // Persistent settings
+    settings_path: PathBuf,
+    saved_settings: settings::AppSettings,
+    settings_checked_at: f64,
+    last_dir: Option<PathBuf>,
+    recent_files: Vec<PathBuf>,
+    /// A file passed on the command line, opened on the first frame.
+    startup_file: Option<PathBuf>,
     // Open path fallback + status
     open_path: String,
     workspace_status: Option<String>,
@@ -454,8 +465,10 @@ impl StvizApp {
         let _ = std::fs::create_dir_all(&converter_venv_dir);
         Self::cleanup_mock_artifacts(&output_dir);
         let ffmpeg_path = Self::resolve_ffmpeg_path(&project_dir);
+        let settings_path = app_data_dir.join("settings.json");
+        let saved_settings = settings::AppSettings::load(&settings_path);
 
-        let app = Self {
+        let mut app = Self {
             dataset: None,
             dataset_path: None,
             dataset_id: 1,
@@ -614,6 +627,14 @@ impl StvizApp {
             gene_query: String::new(),
             gene_selected: None,
 
+            clip_outliers: false,
+            settings_path,
+            saved_settings: saved_settings.clone(),
+            settings_checked_at: f64::NEG_INFINITY,
+            last_dir: None,
+            recent_files: Vec::new(),
+            // `stviz-animate <file>` (or "Open with...") opens a .h5ad/.stviz.
+            startup_file: std::env::args_os().nth(1).map(PathBuf::from),
             open_path: String::new(),
             workspace_status: None,
             last_error: None,
@@ -621,6 +642,7 @@ impl StvizApp {
             last_viewport_points: egui::Rect::ZERO,
             last_viewport_px: [0.0, 0.0],
         };
+        app.apply_settings(&saved_settings);
         if app.fullscreen {
             app.apply_fullscreen(&cc.egui_ctx);
         } else {
@@ -642,6 +664,7 @@ impl Drop for StvizApp {
             let _ = job.join();
         }
         Self::cleanup_mock_artifacts(&self.output_dir);
+        self.save_settings_if_changed(None);
     }
 }
 
@@ -654,8 +677,15 @@ impl eframe::App for StvizApp {
         self.poll_export_job(ctx);
         self.handle_hotkeys(ctx);
         self.handle_dropped_files(ctx);
+        if let Some(path) = self.startup_file.take() {
+            self.open_data_file(&path);
+        }
         self.poll_convert_job();
         self.poll_dataset_load();
+        if let Some(wait) = self.save_settings_if_changed(Some(ctx.input(|i| i.time))) {
+            // The UI only repaints on input; come back to save the pending change.
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(wait));
+        }
         self.maybe_update_playback(ctx);
         let render_prepare_err = { self.shared.last_prepare_error.lock().take() };
         if let Some(err) = render_prepare_err {

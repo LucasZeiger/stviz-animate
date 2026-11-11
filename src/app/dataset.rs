@@ -4,10 +4,9 @@ use super::{
     AdvancedCardFilter, ColorKey, ColorMode, LegendRange, StvizApp, MAX_FILTER_CATEGORIES,
 };
 use crate::{
-    color::{categorical_palette, gradient_map, pack_rgba8},
+    color::{categorical_palette, gradient_map, pack_rgba8, value_range},
     data::{Dataset, ObsMeta},
 };
-use anyhow::Context as _;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -90,6 +89,10 @@ impl StvizApp {
     pub(super) fn install_dataset(&mut self, ds: Arc<Dataset>, path: &Path) -> anyhow::Result<()> {
         self.dataset = Some(ds.clone());
         self.dataset_path = Some(path.to_path_buf());
+        if !is_mock_dataset(path) {
+            self.remember_dir_of(path);
+            self.remember_recent_file(path);
+        }
         self.open_path = path.display().to_string();
         self.last_error = None;
         self.dataset_id = self.dataset_id.wrapping_add(1);
@@ -126,11 +129,7 @@ impl StvizApp {
         self.active_filters.clear();
         self.load_filter_state(&ds);
 
-        let is_mock = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(|name| name.starts_with("mock_spatial_"))
-            .unwrap_or(false);
+        let is_mock = is_mock_dataset(path);
         if is_mock {
             let mut mock_spaces = Vec::new();
             let mut push_unique = |idx: usize| {
@@ -198,7 +197,8 @@ impl StvizApp {
             }
         }
 
-        self.sample_grid_obs_idx = find_obs_by_name(&ds, "sample");
+        self.sample_grid_obs_idx =
+            find_categorical_by_names(&ds, &["sample", "samples", "library_id", "batch"]);
         self.sample_grid_space_idx = find_space_by_name(&ds, "spatial")
             .or_else(|| find_space_by_name(&ds, "centroid"))
             .or_else(|| {
@@ -223,7 +223,15 @@ impl StvizApp {
         self.apply_downsample();
 
         // default colors
-        if let Some(idx) = find_obs_by_name(&ds, "leiden") {
+        let cluster_names = [
+            "leiden",
+            "louvain",
+            "cluster",
+            "clusters",
+            "cell_type",
+            "celltype",
+        ];
+        if let Some(idx) = find_categorical_by_names(&ds, &cluster_names) {
             self.active_obs_idx = idx;
             self.load_filter_state(&ds);
         }
@@ -238,17 +246,18 @@ impl StvizApp {
         if let Some(space_idx) = self.space_path.first().copied() {
             if let Some(space) = ds.meta.spaces.get(space_idx) {
                 let bbox = self.space_bbox_for_view(&ds, space_idx, space);
-                self.camera.fit_bbox(bbox, [1000.0, 700.0], 0.9);
+                // Use the real viewport size once a frame has been drawn.
+                let viewport_px =
+                    if self.last_viewport_px[0] > 0.0 && self.last_viewport_px[1] > 0.0 {
+                        self.last_viewport_px
+                    } else {
+                        [1000.0, 700.0]
+                    };
+                self.camera.fit_bbox(bbox, viewport_px, 0.9);
             }
         }
 
         Ok(())
-    }
-
-    /// Open a .stviz and make it current, blocking until it is loaded.
-    pub(super) fn load_dataset(&mut self, path: &Path) -> anyhow::Result<()> {
-        let ds = Dataset::load(path).context("load dataset")?;
-        self.install_dataset(ds, path)
     }
 
     pub(super) fn recompute_colors_and_filters(&mut self) -> anyhow::Result<()> {
@@ -353,18 +362,10 @@ impl StvizApp {
                 }
 
                 let (name, vals) = ds.obs_continuous(self.active_obs_idx)?;
-                let mut vmin = f32::INFINITY;
-                let mut vmax = f32::NEG_INFINITY;
-                for &v in vals {
-                    if v.is_finite() {
-                        vmin = vmin.min(v);
-                        vmax = vmax.max(v);
-                    }
-                }
-                if !vmin.is_finite() || !vmax.is_finite() || vmin == vmax {
-                    vmin = 0.0;
-                    vmax = 1.0;
-                }
+                let (vmin, vmax) = match value_range(vals, self.clip_outliers) {
+                    Some((lo, hi)) if lo < hi => (lo, hi),
+                    _ => (0.0, 1.0),
+                };
                 let colors = gradient_map(vals, vmin, vmax, &colorous::VIRIDIS);
                 self.colors_rgba8 = Arc::new(colors);
                 self.colors_opaque = vals.iter().all(|v| v.is_finite());
@@ -666,22 +667,62 @@ impl StvizApp {
     }
 }
 
-fn find_obs_by_name(ds: &Dataset, needle: &str) -> Option<usize> {
+/// Mock datasets are temporary and get a showcase timeline when loaded.
+fn is_mock_dataset(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("mock_spatial_"))
+}
+
+/// Index of the name that best matches `needle`, ignoring case: an exact
+/// match first, then a name with `needle` as a whole word ("X_umap" for
+/// "umap", but not "n_samples" for "sample").
+fn best_name_match<'a>(
+    names: impl Iterator<Item = &'a str> + Clone,
+    needle: &str,
+) -> Option<usize> {
     let needle = needle.to_ascii_lowercase();
-    ds.meta.obs.iter().enumerate().find_map(|(i, o)| match o {
-        ObsMeta::Categorical { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
-        ObsMeta::Continuous { name, .. } if name.to_ascii_lowercase().contains(&needle) => Some(i),
-        _ => None,
-    })
+    names
+        .clone()
+        .position(|name| name.eq_ignore_ascii_case(&needle))
+        .or_else(|| {
+            names.clone().position(|name| {
+                name.to_ascii_lowercase()
+                    .split(|c: char| !c.is_ascii_alphanumeric())
+                    .any(|word| word == needle)
+            })
+        })
+}
+
+/// First categorical obs column matching one of `needles`, in order of preference.
+fn find_categorical_by_names(ds: &Dataset, needles: &[&str]) -> Option<usize> {
+    let names = ds.meta.obs.iter().map(|o| match o {
+        ObsMeta::Categorical { name, .. } => name.as_str(),
+        // Never matches: only categorical columns are candidates.
+        ObsMeta::Continuous { .. } => "",
+    });
+    needles
+        .iter()
+        .find_map(|needle| best_name_match(names.clone(), needle))
 }
 
 fn find_space_by_name(ds: &Dataset, needle: &str) -> Option<usize> {
-    let needle = needle.to_ascii_lowercase();
-    ds.meta.spaces.iter().enumerate().find_map(|(i, s)| {
-        if s.name.to_ascii_lowercase().contains(&needle) {
-            Some(i)
-        } else {
-            None
-        }
-    })
+    best_name_match(ds.meta.spaces.iter().map(|s| s.name.as_str()), needle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::best_name_match;
+
+    #[test]
+    fn name_matching_prefers_exact_then_whole_words() {
+        let names = ["n_samples", "Sample_ID", "sample", "X_umap", "umap_3d"];
+        let find = |needle| best_name_match(names.iter().copied(), needle);
+        assert_eq!(find("sample"), Some(2));
+        assert_eq!(find("umap"), Some(3));
+        assert_eq!(find("x_umap"), Some(3));
+        assert_eq!(find("id"), Some(1));
+        assert_eq!(find("samp"), None);
+        assert_eq!(best_name_match(["n_samples"].into_iter(), "sample"), None);
+    }
 }

@@ -639,7 +639,8 @@ mod encode_tests {
         std::fs::create_dir_all(&frames_dir).unwrap();
         std::fs::create_dir_all(&output_root).unwrap();
         for i in 0..4u8 {
-            let img = image::RgbaImage::from_pixel(32, 32, image::Rgba([i * 60, 0, 0, 255]));
+            // Odd sizes, as a viewport capture can have: yuv420p needs even ones.
+            let img = image::RgbaImage::from_pixel(33, 31, image::Rgba([i * 60, 0, 0, 255]));
             img.save(frames_dir.join(format!("frame_{i:06}.png")))
                 .unwrap();
         }

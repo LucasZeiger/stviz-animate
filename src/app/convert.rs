@@ -431,6 +431,7 @@ impl StvizApp {
             self.convert_status = Some("Enter a layer name, or pick another source.".to_string());
             return;
         }
+        self.remember_dir_of(path);
         let source = std::fs::canonicalize(path)
             .unwrap_or_else(|_| path.to_path_buf())
             .display()

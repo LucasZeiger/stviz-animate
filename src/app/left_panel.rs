@@ -9,16 +9,13 @@ use super::{
         format_scale_value, obs_name,
     },
     CategoricalPalette, CategoryPaletteCache, ColorMode, ExportEncodingSpeed, ExportQuality,
-    ExportVideoQuality, LegendRange, SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
+    ExportVideoQuality, SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
     MAX_GRID_CATEGORIES,
 };
-use crate::{
-    color::{gradient_map, pack_rgba8},
-    data::Dataset,
-};
+use crate::{color::pack_rgba8, data::Dataset};
 use eframe::egui;
 use rand::seq::SliceRandom;
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 impl StvizApp {
     pub(super) fn ui_left_panel(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -175,7 +172,7 @@ impl StvizApp {
                 .add_filter("h5ad", &["h5ad"])
                 .add_filter("stviz", &["stviz"])
                 .set_title("Select .h5ad or .stviz")
-                .set_directory(self.project_dir.clone());
+                .set_directory(self.dialog_dir());
             if let Some(path) = dialog.pick_file() {
                 self.open_data_file(&path);
             }
@@ -220,6 +217,30 @@ impl StvizApp {
                 eprintln!("{msg}");
                 self.last_error = Some(msg);
             }
+        }
+        if !self.recent_files.is_empty() {
+            ui.menu_button("Recent datasets", |ui| {
+                for path in self.recent_files.clone() {
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path.display().to_string());
+                    if ui
+                        .button(name)
+                        .on_hover_text(path.display().to_string())
+                        .clicked()
+                    {
+                        if path.exists() {
+                            self.open_data_file(&path);
+                        } else {
+                            self.recent_files.retain(|p| p != &path);
+                            self.last_error =
+                                Some(format!("File no longer exists: {}", path.display()));
+                        }
+                        ui.close();
+                    }
+                }
+            });
         }
         ui.horizontal(|ui| {
             if ui
@@ -541,6 +562,26 @@ impl StvizApp {
                 self.legend_range = None;
             }
         });
+        if self.color_mode != ColorMode::Categorical
+            && ui
+                .checkbox(&mut self.clip_outliers, "Clip outliers (1-99%)")
+                .on_hover_text(
+                    "Scale colors to the 1st-99th percentile so a few extreme values \
+                     don't flatten the gradient.",
+                )
+                .changed()
+        {
+            self.color_cache.clear();
+            self.filtered_color_cache.clear();
+            match (self.color_mode, self.gene_selected.clone()) {
+                (ColorMode::Gene, Some(gene)) => {
+                    self.apply_gene_colors(ds, &gene);
+                }
+                _ => {
+                    let _ = self.recompute_colors_and_filters();
+                }
+            }
+        }
 
         match self.color_mode {
             ColorMode::Categorical => {
@@ -912,27 +953,8 @@ impl StvizApp {
                     }
 
                     if let Some(gene) = apply_gene {
-                        if let Some(gid) = ds.find_gene(&gene) {
-                            if let Ok(vec) = ds.gene_vector_csc(gid) {
-                                let mut vmax = 0.0f32;
-                                for &v in &vec {
-                                    if v.is_finite() {
-                                        vmax = vmax.max(v);
-                                    }
-                                }
-                                let vmin = 0.0;
-                                let vmax = vmax.max(1e-6);
-                                let colors = gradient_map(&vec, vmin, vmax, &colorous::VIRIDIS);
-                                self.colors_rgba8 = Arc::new(colors);
-                                self.colors_opaque = vec.iter().all(|v| v.is_finite());
-                                self.colors_id = self.next_color_id();
-                                self.legend_range = Some(LegendRange {
-                                    label: format!("Gene: {gene}"),
-                                    min: vmin,
-                                    max: vmax,
-                                });
-                                let _ = self.recompute_draw_indices_no_filter();
-                            }
+                        if self.apply_gene_colors(ds, &gene) {
+                            let _ = self.recompute_draw_indices_no_filter();
                         }
                     }
                 } else {

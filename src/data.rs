@@ -82,6 +82,12 @@ pub struct Dataset {
 impl Dataset {
     pub fn load(path: &Path) -> anyhow::Result<Arc<Self>> {
         let file = File::open(path).with_context(|| format!("open: {}", path.display()))?;
+        if file.metadata().map(|m| m.len() == 0).unwrap_or(false) {
+            return Err(anyhow!("the file is empty: {}", path.display()));
+        }
+        // Safety: the mapping is read-only. The converter never modifies a
+        // .stviz in place (it writes a new file and renames it over the old
+        // one), so the mapped bytes do not change underneath us.
         let mmap = unsafe { Mmap::map(&file).context("mmap")? };
 
         let (json_start, json_len, header_version) = Self::parse_header(&mmap)?;
@@ -647,7 +653,8 @@ mod tests {
         let (meta, data) = stviz_parts(6, None);
         let good = encode_stviz(&meta, &data);
 
-        assert!(load_err("empty.stviz", b"").contains("too small"));
+        assert!(load_err("empty.stviz", b"").contains("empty"));
+        assert!(load_err("tiny.stviz", b"abc").contains("too small"));
         assert!(!load_err("garbage.stviz", &[0xFFu8; 64]).is_empty());
         // Truncated data section.
         assert!(load_err("short.stviz", &good[..good.len() - 8]).contains("out of file bounds"));
