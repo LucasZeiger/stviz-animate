@@ -258,6 +258,8 @@ Export controls:
 - Logs: `<user-data>/logs/convert_log_*.txt`, `<user-data>/logs/export_log_*.txt`.
 
 ## Packaging and distribution
+Releases are built by `.github/workflows/release.yml`. Pushing a tag such as `v1.1.0` builds all three bundles with the scripts below and attaches them to a GitHub Release. The tag must match the `version` in `Cargo.toml`. Running the workflow by hand from the Actions tab builds the bundles as downloadable artifacts without publishing. Bundles are written to `dist/`, which is not tracked in git.
+
 Scripts:
 - Windows: `scripts/package_windows.ps1`
 - macOS: `scripts/package_mac.sh`

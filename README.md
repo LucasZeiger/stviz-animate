@@ -13,6 +13,8 @@ Animate transitions between coordinate spaces (spatial, UMAP, tSNE, PCA, ...), a
 
 ## Quick start
 
+Download the latest build for your system from [GitHub Releases](https://github.com/LucasZeiger/stviz-animate/releases/latest).
+
 ## Running release zips
 
 Windows:
@@ -21,6 +23,10 @@ Windows:
 3) Run `stviz-animate.exe`.
 
 Ignore the trusted developer warning message if it shows up.
+
+macOS (Apple Silicon):
+1) Download `stviz-animate-mac.zip` from GitHub Releases and unzip it.
+2) Right-click `stviz-animate.app` and choose **Open** the first time (the build is not signed).
 
 Linux (Ubuntu):
 1) Download the `stviz-animate-ubuntu.tar.gz` from GitHub Releases.
@@ -106,8 +112,15 @@ Requires Python 3.9+ (Python 3.10+ recommended).
 - If `ffmpeg` is missing, the Output panel offers an opt-in install via the system package manager (winget/choco, brew, or apt/dnf/pacman/zypper). It is off by default; internet access and possibly admin rights are required.
 - Encoding, the OpenCV fallback and the ffmpeg install run in the background, so the app stays responsive and **Cancel export** stops them.
 
+## Making a release
+1) Set `version` in `Cargo.toml` (e.g. `1.1.0`) and merge it to `main`.
+2) Tag and push: `git tag v1.1.0 && git push origin v1.1.0`.
+3) The **Release** workflow builds Windows, macOS (Apple Silicon) and Ubuntu bundles and publishes them as a GitHub Release.
+
+You can also run the workflow by hand from the Actions tab to get the bundles as build artifacts without publishing a release.
+
 ## Packaging
-Scripts to produce portable bundles:
+Scripts to produce portable bundles locally (written to `dist/`, which is not committed):
 
 Windows:
 ```powershell

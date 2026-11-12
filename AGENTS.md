@@ -7,7 +7,7 @@
 - `data/`: sample datasets (if present).
 - `docs/`: technical documentation (`technical_documentation.md`, `technical_documentation.pdf`).
 - `scripts/`: packaging helpers for Windows/macOS/Linux.
-- `dist/`: packaged release artifacts (tracked in repo).
+- `dist/`: packaged release bundles written by the packaging scripts (not committed; releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed).
 - `output/`: runtime exports (screenshots, recordings, videos).
 - `target/`: Cargo build artifacts (do not commit).
 - `.stviz_venv/`: auto-created Python venv for conversion (do not commit).
