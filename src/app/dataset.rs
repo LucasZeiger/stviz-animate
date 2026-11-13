@@ -76,6 +76,7 @@ impl StvizApp {
     pub(super) fn unload_dataset(&mut self) {
         self.dataset = None;
         self.dataset_path = None;
+        self.scenes = Default::default();
         self.dataset_id = self.dataset_id.wrapping_add(1);
         self.shared.params.lock().dataset = None;
         self.base_indices.clear();
@@ -87,6 +88,7 @@ impl StvizApp {
     /// Make an already opened dataset the current one and reset the view,
     /// timeline, colors and filters to their defaults for it.
     pub(super) fn install_dataset(&mut self, ds: Arc<Dataset>, path: &Path) -> anyhow::Result<()> {
+        self.reset_scenes_for(&ds);
         self.dataset = Some(ds.clone());
         self.dataset_path = Some(path.to_path_buf());
         if !is_mock_dataset(path) {

@@ -28,6 +28,7 @@ mod left_panel;
 mod overlay;
 mod process;
 mod render_callback;
+mod scenes;
 mod selection;
 mod settings;
 mod style;
@@ -259,6 +260,8 @@ pub struct StvizApp {
     overlay: overlay::OverlaySettings,
     /// Hover details, legend highlighting and the lasso selection.
     selection: selection::SelectionState,
+    /// Named scenes stored in the open .stviz file.
+    scenes: scenes::SceneState,
 
     // Legend / gene input
     legend_range: Option<LegendRange>,
@@ -645,6 +648,7 @@ impl StvizApp {
 
             overlay: overlay::OverlaySettings::default(),
             selection: selection::SelectionState::new(),
+            scenes: scenes::SceneState::default(),
             legend_range: None,
             active_legend_range: None,
             gene_query: String::new(),

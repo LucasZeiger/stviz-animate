@@ -37,6 +37,7 @@ impl StvizApp {
         };
 
         self.ui_dataset_info(ui, &ds);
+        self.ui_scenes_section(ui);
         self.ui_sample_grid_section(ui, &ds);
         self.ui_color_section(ui, &ds);
         self.ui_filters_and_legend(ui, &ds);

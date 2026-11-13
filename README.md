@@ -84,6 +84,7 @@ Converting from the command line, and what the converter does with each part of 
 ## Workspaces and settings
 - **Save workspace** stores the timeline (including the advanced timeline layout), colors, filters, view and export settings in a `.workspace.json` file.
 - A workspace finds its dataset at the saved path or, failing that, next to the workspace file, so the two can be moved or shared together.
+- **Saved scenes** stores the same view (timeline, colours and palettes, filters, camera, labels, playback and export settings) inside the `.stviz` file under a name. Type a name and press **Save scene**; **Load** brings it back and **Delete** removes it. A file can hold any number of scenes, so sending one `.stviz` is enough for someone else to reproduce a view or video. Saving a scene doesn't rewrite the data, files with scenes still open in older versions of the app, and converting the same `.h5ad` again keeps them.
 - Appearance, the last used folder and recent datasets are remembered between launches.
 
 ## Export

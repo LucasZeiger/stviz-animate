@@ -36,7 +36,7 @@ Key runtime goals:
     - `dataset.rs`, `keyframes.rs`, `layout.rs`: loading data, color/filter recomputation, keyframe bookkeeping, bounding boxes and the sample grid.
     - `export.rs`, `convert.rs`, `env.rs`: video/screenshot export, `.h5ad` conversion and mock data, and locating Python/ffmpeg/app directories.
     - `export_job.rs`: the background worker for slow export steps (ffmpeg/OpenCV encoding, opt-in ffmpeg install). It reports log lines over a channel; `poll_export_job` applies them each frame.
-    - `workspace.rs`, `input.rs`, `render_callback.rs`, `util.rs`: workspace save/restore, hotkeys and playback ticking, the wgpu paint callback, and small shared helpers.
+    - `workspace.rs`, `scenes.rs`, `input.rs`, `render_callback.rs`, `util.rs`: workspace save/restore, scenes saved in the .stviz, hotkeys and playback ticking, the wgpu paint callback, and small shared helpers.
     - `settings.rs`, `process.rs`: preferences persisted between launches, and cancellable subprocess helpers (captured or line-streamed output) used by the conversion and export workers.
     - `style.rs`, `window.rs`: categorical palettes and theme visuals; fullscreen, display refresh rate and WSL detection.
   - `render.rs`: WGPU pipeline and point cloud rendering.
@@ -82,6 +82,15 @@ File layout:
 - Bytes 20..(20+json_len-1): JSON metadata (`StvizMeta`).
 - Padding to 16-byte alignment.
 - Binary data blocks (spaces, obs, expression arrays) referenced by offsets in metadata.
+- Optional saved scenes block (see below).
+
+Saved scenes (optional, after the data section):
+- `[scenes JSON + space padding][u64 block_len][u32 scenes version][magic "STVZSCN\0"]`, the last 20 bytes being the footer.
+- The JSON is `{"version": 1, "scenes": [{"name": ..., "saved_with": ..., "view": {...}}]}`; `view` has the same fields as a workspace without the dataset path.
+- Readers that don't know about scenes (app 1.1.0 and earlier, the Python tests) only read up to the end of the data blocks, so files with scenes still open there. The main header version stays 1.
+- A footer is only trusted if its block starts at or after the end of the data blocks. A newer scenes version or damaged JSON gives a warning and the dataset still opens; a newer version is never overwritten.
+- Saving or deleting a scene overwrites the block in place (or appends it if there is none) and never touches the data. The file never shrinks, because Windows refuses to truncate a memory-mapped file; a shorter block is padded with spaces.
+- Converting the same `.h5ad` again copies the old file's scenes into the new one.
 
 Metadata (`StvizMeta`):
 - `version`: format version.
@@ -332,6 +341,10 @@ Workspaces (`src/app/workspace.rs`):
 - Stores keyframes, colors, filters, view, sample grid, export settings and the advanced timeline layout (card positions, sizes, durations, connections).
 - The dataset is looked up at the saved path, then next to the workspace file by file name.
 - Opening validates the dataset and every referenced space/field before changing the current session.
+
+Saved scenes (`src/app/scenes.rs`):
+- A scene is a named `WorkspaceView` (everything a workspace restores except the dataset path, UI scale and theme) stored in the `.stviz` itself; see the data format section.
+- Scenes are kept as raw JSON so entries this version can't read survive when others are saved or deleted. Saving with an existing name replaces that scene.
 
 Subprocesses (`src/app/process.rs`):
 - `run_cancellable` (captured output) and `run_streaming` (line by line) poll the child and stop it when the job's cancel flag is set.
