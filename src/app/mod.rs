@@ -126,6 +126,10 @@ pub struct StvizApp {
     playback_mode: PlaybackMode,
     ease_mode: EaseMode,
     point_radius_px: f32,
+    /// Scale points with zoom (fixed size in world units) instead of fixed pixels.
+    point_auto_scale: bool,
+    /// Largest radius (logical px) auto-scaling may grow points to.
+    point_auto_max_px: f32,
     max_draw_points: usize,
     fast_render: bool,
 
@@ -518,6 +522,8 @@ impl StvizApp {
             playback_mode: PlaybackMode::PingPong,
             ease_mode: EaseMode::Smoothstep,
             point_radius_px: 0.5,
+            point_auto_scale: false,
+            point_auto_max_px: 12.0,
             max_draw_points: 0,
             fast_render: cpu_adapter,
 
