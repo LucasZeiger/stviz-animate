@@ -84,6 +84,7 @@ def test_roundtrip_csr():
     n = adata.n_obs
     meta, block, data_size = read_stviz(convert(adata))
     assert meta["n_points"] == n
+    assert meta["obs_names"] == list(adata.obs_names)
 
     spaces = {s["name"]: s for s in meta["spaces"]}
     assert set(spaces) == {"spatial", "X_umap", "X_pca"}

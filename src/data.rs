@@ -87,6 +87,9 @@ pub struct StvizMeta {
     pub spaces: Vec<SpaceMeta>,
     pub obs: Vec<ObsMeta>,
     pub expr: Option<ExprMeta>,
+    /// Cell names (the .h5ad obs index), when the converter recorded them.
+    #[serde(default)]
+    pub obs_names: Option<Vec<String>>,
 }
 
 /// The scenes saved in a .stviz file. Each scene is kept as raw JSON so that
@@ -367,6 +370,15 @@ impl Dataset {
             data_end = data_end.max(self.validate_expr(expr, n_points)?);
         }
 
+        if let Some(names) = self.meta.obs_names.as_ref() {
+            if names.len() != n_points {
+                return Err(anyhow!(
+                    "obs_names has {} entries (expected {n_points})",
+                    names.len()
+                ));
+            }
+        }
+
         Ok(data_end)
     }
 
@@ -534,6 +546,45 @@ impl Dataset {
             }
             _ => Err(anyhow!("obs is not continuous")),
         }
+    }
+
+    /// The cell's name from the .h5ad, or its row number when the file has
+    /// no names (converted before names were recorded).
+    pub fn cell_name(&self, cell: u32) -> String {
+        self.meta
+            .obs_names
+            .as_ref()
+            .and_then(|names| names.get(cell as usize))
+            .cloned()
+            .unwrap_or_else(|| cell.to_string())
+    }
+
+    /// Expression of one gene in one cell (0.0 where the cell has no entry).
+    pub fn gene_value(&self, gene_id: u32, cell: u32) -> anyhow::Result<f32> {
+        let e = self
+            .meta
+            .expr
+            .as_ref()
+            .ok_or_else(|| anyhow!("no expr in file"))?;
+        let indptr = self.slice_typed::<u32>(e.indptr_offset, e.indptr_len_bytes, "expr indptr")?;
+        let indices =
+            self.slice_typed::<u32>(e.indices_offset, e.indices_len_bytes, "expr indices")?;
+        let data = self.slice_typed::<f32>(e.data_offset, e.data_len_bytes, "expr data")?;
+        let g = gene_id as usize;
+        if g + 1 >= indptr.len() {
+            return Err(anyhow!("gene_id out of range"));
+        }
+        let (start, end) = (indptr[g] as usize, indptr[g + 1] as usize);
+        if start > end || end > indices.len() || end > data.len() {
+            return Err(anyhow!("invalid csc pointers"));
+        }
+        // Row indices are usually sorted within a column, but nothing in the
+        // format promises it, so scan.
+        Ok(indices[start..end]
+            .iter()
+            .position(|&c| c == cell)
+            .map(|k| data[start + k])
+            .unwrap_or(0.0))
     }
 
     /// Replace the scenes stored in this dataset's file. See `write_scenes`.
@@ -844,6 +895,22 @@ mod tests {
             vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
         );
         assert!(ds.find_gene("missing").is_none());
+        assert_eq!(ds.gene_value(gene, 4).unwrap(), 5.0);
+        // No names recorded: the row number stands in.
+        assert_eq!(ds.cell_name(3), "3");
+    }
+
+    #[test]
+    fn reads_cell_names_and_checks_their_count() {
+        let (mut meta, data) = stviz_parts(3, None);
+        meta["obs_names"] = serde_json::json!(["AAAC-1", "AAAG-1", "AACT-1"]);
+        let path = temp_file("names.stviz");
+        std::fs::write(&path, encode_stviz(&meta, &data)).unwrap();
+        let ds = Dataset::load(&path).unwrap();
+        assert_eq!(ds.cell_name(1), "AAAG-1");
+
+        meta["obs_names"] = serde_json::json!(["only-one"]);
+        assert!(load_err("names_short.stviz", &encode_stviz(&meta, &data)).contains("obs_names"));
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 use super::{
     render_callback::PointCloudCallback,
+    selection,
     util::{
         apply_ease, contrast_color, effective_point_radius, export_phase_to_t, zoom_relative_to_fit,
     },
@@ -13,7 +14,8 @@ use std::sync::Arc;
 
 impl StvizApp {
     pub(super) fn ui_viewport(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
+        let (rect, response) =
+            ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         self.last_viewport_points = rect;
         ui.painter().rect_filled(rect, 0.0, self.background_color);
         if self.dataset.is_none() {
@@ -24,8 +26,10 @@ impl StvizApp {
             return;
         }
 
-        // Interactions
-        if response.dragged() {
+        // Interactions. A drag either draws a lasso (Shift, or the lasso tool)
+        // or pans.
+        let lasso = self.selection_input(&response, ctx);
+        if !lasso && response.dragged() {
             let delta = response.drag_delta();
             let ppp = ctx.pixels_per_point();
             self.camera.pan_by_pixels([delta.x * ppp, delta.y * ppp]);
@@ -213,6 +217,56 @@ impl StvizApp {
             }
         }
 
+        let point_radius_device_px = effective_point_radius(
+            self.point_radius_px * ppp, // scale with dpi so it looks consistent
+            self.point_auto_scale,
+            zoom_relative_to_fit(view_camera.pixels_per_unit, viewport_px),
+            self.point_auto_max_px * ppp,
+        );
+
+        if let Some(ds) = ds_opt.as_ref() {
+            let near_to = segment_t >= 0.5;
+            let snapshot = selection::ViewSnapshot {
+                rect,
+                ppp,
+                camera: view_camera,
+                from: match &from_override {
+                    Some(p) => selection::PosSource::Grid(p.clone()),
+                    None => selection::PosSource::Space(active_from),
+                },
+                to: match &to_override {
+                    Some(p) => selection::PosSource::Grid(p.clone()),
+                    None => selection::PosSource::Space(active_to),
+                },
+                from_center,
+                from_scale,
+                to_center,
+                to_scale,
+                t: t_eased,
+                draw_indices: draw_indices.clone(),
+                colors_from: colors_from.clone(),
+                colors_to: colors_to.clone(),
+                color_t,
+                shown_space: if near_to { active_to } else { active_from },
+                shown_color: if near_to {
+                    color_to.clone()
+                } else {
+                    color_from.clone()
+                },
+                point_radius_pts: point_radius_device_px / ppp,
+            };
+            self.apply_selection_view(
+                ds,
+                snapshot,
+                &mut colors_from,
+                &mut colors_from_id,
+                &mut colors_to,
+                &mut colors_to_id,
+                &mut draw_indices,
+                &mut indices_id,
+            );
+        }
+
         self.active_legend_range = if self.color_path_enabled {
             legend_from.clone()
         } else {
@@ -226,12 +280,7 @@ impl StvizApp {
             _pad1: [0.0; 2],
             pixels_per_unit: view_camera.pixels_per_unit,
             t: t_eased,
-            point_radius_px: effective_point_radius(
-                self.point_radius_px * ppp, // scale with dpi so it looks consistent
-                self.point_auto_scale,
-                zoom_relative_to_fit(view_camera.pixels_per_unit, viewport_px),
-                self.point_auto_max_px * ppp,
-            ),
+            point_radius_px: point_radius_device_px,
             mask_mode: if self.fast_render { 0.0 } else { 1.0 },
             color_t,
             _pad2: 0.0,
@@ -274,6 +323,7 @@ impl StvizApp {
 
         self.draw_view_overlays(ui, rect);
         self.draw_overlay_preview(ui, rect, ppp);
+        self.draw_selection_overlay(ui, &response, ctx);
 
         if self.exporting_loop && self.export_total_frames > 0 {
             let path = self

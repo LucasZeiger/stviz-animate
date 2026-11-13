@@ -684,6 +684,8 @@ def export_stviz(
             "spaces": space_meta,
             "obs": obs_meta,
             "expr": expr_meta,
+            # Cell names, so the app can show and export them.
+            "obs_names": [str(x) for x in obs_df.index],
         }
         meta_bytes = json.dumps(meta, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
         header = STVIZ_MAGIC + struct.pack("<I", STVIZ_VERSION) + struct.pack("<Q", len(meta_bytes))

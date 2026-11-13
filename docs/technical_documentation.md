@@ -98,6 +98,7 @@ Metadata (`StvizMeta`):
 - `spaces`: list of 2D spaces with offsets and bounding boxes.
 - `obs`: list of categorical/continuous annotation columns.
 - `expr`: optional CSC gene expression metadata.
+- `obs_names`: optional cell names (the `.h5ad` obs index), one per point. Files converted before this field existed still open; cells are then named by their row number.
 
 Space metadata (`SpaceMeta`):
 - `name`: space identifier (e.g., `spatial`, `X_umap`).
@@ -192,6 +193,11 @@ Viewport interactions:
 - Pan by dragging.
 - Zoom by mouse wheel.
 - Reset scaling via timeline controls.
+- Hover a cell for a tooltip with its name, row, colour-by value (or gene expression) and every annotation.
+- Hover a category in the left panel, or hover/click an entry of the viewport legend, to highlight that group: other cells are blended towards the background and drawn first. A click pins the highlight; click again to clear.
+- Shift + drag (or drag with **Lasso tool** on) draws a lasso. Ctrl/Cmd adds to the selection, Alt removes. Cells outside the selection are dimmed; **Export CSV...** in the Selection section writes the selected cells.
+
+Selection internals (`src/app/selection.rs`): the viewport records a `ViewSnapshot` each frame (segment spaces or sample-grid positions, their normalisation, camera, `t`) and projects cells to the screen on the CPU the same way the shader does. The lasso tests every cell that passes the filters (not only the drawn sample), so a draw cap doesn't thin the selection. Highlighting replaces the colour arrays and draw indices sent to the GPU with dimmed/reordered copies (cached by id); video exports skip it, screenshots keep it. The CSV has `cell_id`, `row` (0-based row in the `.h5ad`), `<space>_x/_y` in original units for the space on screen (the nearer end of a transition), every obs column, and the expression of the gene shown when colouring by a gene.
 
 ## Timeline system
 The timeline controls transitions between spaces and colors.

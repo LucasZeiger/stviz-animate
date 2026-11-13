@@ -70,7 +70,7 @@ cargo run --release
 
 ## First steps
 - With no dataset loaded, the view shows a welcome screen: **Open a dataset...**, **Try demo data** (a 50,000-cell synthetic spatial dataset; needs Python), your recent datasets and a three-step guide.
-- **Open data...** and **Shortcuts (?)** sit in the top bar. Press `?` or `F1` for the shortcut list: Space plays and pauses, the arrow keys step through frames, Esc leaves fullscreen, drag pans and scroll zooms.
+- **Open data...** and **Shortcuts (?)** sit in the top bar. Press `?` or `F1` for the shortcut list: Space plays and pauses, the arrow keys step through frames, Esc leaves fullscreen, drag pans and scroll zooms. Hover a cell to see its details, click a legend entry to highlight a group, and Shift + drag to lasso cells and export them as CSV from the Selection section.
 - Most controls explain themselves when you hover over them.
 
 ## Data conversion (.h5ad -> .stviz)

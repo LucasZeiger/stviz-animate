@@ -29,6 +29,7 @@ mod overlay;
 mod process;
 mod render_callback;
 mod scenes;
+mod selection;
 mod settings;
 mod style;
 mod timeline;
@@ -257,6 +258,8 @@ pub struct StvizApp {
 
     /// Title, legend and scale bar drawn over the view and into exports.
     overlay: overlay::OverlaySettings,
+    /// Hover details, legend highlighting and the lasso selection.
+    selection: selection::SelectionState,
     /// Named scenes stored in the open .stviz file.
     scenes: scenes::SceneState,
 
@@ -644,6 +647,7 @@ impl StvizApp {
             sample_grid_custom_labels: Vec::new(),
 
             overlay: overlay::OverlaySettings::default(),
+            selection: selection::SelectionState::new(),
             scenes: scenes::SceneState::default(),
             legend_range: None,
             active_legend_range: None,

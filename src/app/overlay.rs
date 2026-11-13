@@ -174,6 +174,25 @@ fn with_alpha(c: [u8; 4], a: u8) -> [u8; 4] {
 
 /// Lay the overlay out for an output of `size` pixels.
 pub(super) fn layout(content: &OverlayContent, size: [f32; 2]) -> Vec<Prim> {
+    layout_with_legend_rows(content, size).0
+}
+
+/// [`layout`], plus the area of each categorical legend row (x, y, w, h) and
+/// its label, so the viewport can make the legend clickable.
+pub(super) fn layout_with_legend_rows(
+    content: &OverlayContent,
+    size: [f32; 2],
+) -> (Vec<Prim>, Vec<([f32; 4], String)>) {
+    let mut rows_out = Vec::new();
+    let prims = layout_inner(content, size, &mut rows_out);
+    (prims, rows_out)
+}
+
+fn layout_inner(
+    content: &OverlayContent,
+    size: [f32; 2],
+    legend_rows: &mut Vec<([f32; 4], String)>,
+) -> Vec<Prim> {
     let [w, h] = size;
     if w < 16.0 || h < 16.0 {
         return Vec::new();
@@ -266,6 +285,7 @@ pub(super) fn layout(content: &OverlayContent, size: [f32; 2]) -> Vec<Prim> {
                     }
                     let (label, color) = &entries[i];
                     let ry = body_y + row as f32 * row_h;
+                    legend_rows.push(([col_x, ry, *col_w, row_h], label.clone()));
                     prims.push(Prim::Circle {
                         center: [col_x + swatch_r, ry + label_size * 0.55],
                         radius: swatch_r,
@@ -534,6 +554,7 @@ impl Canvas<'_> {
 impl StvizApp {
     /// Draw the overlay over the viewport, as a preview of what exports get.
     pub(super) fn draw_overlay_preview(&mut self, ui: &egui::Ui, rect: egui::Rect, ppp: f32) {
+        self.selection.legend_rows.clear();
         let Some(ds) = self.dataset.clone() else {
             return;
         };
@@ -546,8 +567,18 @@ impl StvizApp {
         if self.show_stats {
             area.min.y += 18.0;
         }
-        let prims = layout(&content, [area.width(), area.height()]);
+        let (prims, rows) = layout_with_legend_rows(&content, [area.width(), area.height()]);
         paint_egui(&ui.painter().with_clip_rect(rect), area.min, &prims);
+        self.selection.legend_rows = rows
+            .into_iter()
+            .map(|(r, label)| {
+                let min = area.min + egui::vec2(r[0], r[1]);
+                (
+                    egui::Rect::from_min_size(min, egui::vec2(r[2], r[3])),
+                    label,
+                )
+            })
+            .collect();
     }
 
     /// What the overlay shows for the current frame.
