@@ -57,17 +57,24 @@ impl StvizApp {
             ui.label("10k - 10M");
         });
         ui.horizontal(|ui| {
-            let generate = ui.add_enabled(
-                !self.convert_running(),
-                egui::Button::new("Generate mock dataset"),
-            );
+            let generate = ui
+                .add_enabled(
+                    !self.convert_running(),
+                    egui::Button::new("Generate mock dataset"),
+                )
+                .on_hover_text(
+                    "Create a synthetic spatial dataset with clusters, UMAP, tSNE and PCA, \
+                 then load it. Needs Python; the first run installs the converter.",
+                );
             if generate.clicked() {
                 self.start_mock_dataset();
             }
-            let regen = ui.add_enabled(
-                !self.convert_running() && self.mock_last_h5ad.is_some(),
-                egui::Button::new("Regenerate mock dataset"),
-            );
+            let regen = ui
+                .add_enabled(
+                    !self.convert_running() && self.mock_last_h5ad.is_some(),
+                    egui::Button::new("Regenerate mock dataset"),
+                )
+                .on_hover_text("Make a new random mock dataset with the same settings.");
             if regen.clicked() {
                 self.start_mock_dataset();
             }
@@ -169,14 +176,7 @@ impl StvizApp {
         );
         let drop_resp = drop_resp.on_hover_text("Drop a .h5ad to convert, or a .stviz to load.");
         if drop_resp.clicked() {
-            let dialog = rfd::FileDialog::new()
-                .add_filter("h5ad", &["h5ad"])
-                .add_filter("stviz", &["stviz"])
-                .set_title("Select .h5ad or .stviz")
-                .set_directory(self.dialog_dir());
-            if let Some(path) = dialog.pick_file() {
-                self.open_data_file(&path);
-            }
+            self.pick_data_file();
         }
         if self.convert_running() && ui.button("Cancel conversion").clicked() {
             self.cancel_convert();
@@ -252,7 +252,13 @@ impl StvizApp {
                     self.workspace_status = Some(format!("Workspace save failed: {e:#}"));
                 }
             }
-            if ui.button("Open workspace").clicked() {
+            if ui
+                .button("Open workspace")
+                .on_hover_text(
+                    "Restore a saved timeline, colours, filters and view, with its dataset.",
+                )
+                .clicked()
+            {
                 if let Err(e) = self.open_workspace_dialog() {
                     self.workspace_status = Some(format!("Workspace open failed: {e:#}"));
                 }
@@ -384,7 +390,8 @@ impl StvizApp {
 
         ui.separator();
         ui.label("View");
-        ui.checkbox(&mut self.show_axes, "Show axes");
+        ui.checkbox(&mut self.show_axes, "Show axes")
+            .on_hover_text("Draw small X/Y axes in the bottom-left corner of the view.");
     }
 
     /// Sample grid (spatial) settings.
@@ -1039,7 +1046,11 @@ impl StvizApp {
             ui.label(format!("Drawn: {} / {}", draw_count, ds.meta.n_points));
         }
 
-        if ui.button("Shuffle draw order").clicked() {
+        if ui
+            .button("Shuffle draw order")
+            .on_hover_text("Draw points in random order so no cluster is always painted on top.")
+            .clicked()
+        {
             if let Some(ds) = self.dataset.as_ref() {
                 if self.base_indices.is_empty() {
                     self.base_indices = (0..ds.meta.n_points).collect();
@@ -1050,8 +1061,10 @@ impl StvizApp {
             }
         }
 
-        ui.checkbox(&mut self.fast_render, "Fast render (square points)");
-        ui.checkbox(&mut self.show_stats, "Show stats");
+        ui.checkbox(&mut self.fast_render, "Fast render (square points)")
+            .on_hover_text("Faster on slow GPUs. Full HD and 4K exports always use round points.");
+        ui.checkbox(&mut self.show_stats, "Show stats")
+            .on_hover_text("Show GPU, frame rate and the number of drawn points in the view.");
     }
 
     /// Screenshot and video export controls and the export log.
@@ -1146,7 +1159,11 @@ impl StvizApp {
                         .hint_text("stviz-animate_screenshot"),
                 );
             });
-            if ui.button("Screenshot").clicked() {
+            if ui
+                .button("Screenshot")
+                .on_hover_text("Save a 4K PNG of the current view to the screenshots folder.")
+                .clicked()
+            {
                 let ts = chrono_like_timestamp();
                 let mut stem = self.screenshot_name.trim().to_string();
                 if stem.is_empty() {

@@ -289,6 +289,10 @@ Persistent settings:
 Command line:
 - `stviz-animate <file.h5ad|file.stviz>` opens the file at startup.
 
+First-run help (`src/app/help.rs`):
+- `ui_welcome` replaces the viewport while no dataset is loaded: open a file, generate demo data, recent datasets, a short guide, and conversion progress with Cancel.
+- `ui_top_bar` holds the app version, **Open data...** and **Shortcuts (?)**. `ui_shortcuts_window` lists `SHORTCUTS` and is toggled with `?`/`F1` in `handle_hotkeys`; Esc closes it first.
+
 Labels overlay (`src/app/overlay.rs`):
 - `OverlaySettings` (title, legend, space name, scale bar, units per coordinate, label size) is saved in workspaces.
 - `overlay_content` decides what to show for the current time: the legend follows the colour key of the segment half the view is in, and the scale bar only appears while the view rests on a space whose name contains "spatial" and the sample grid is off.

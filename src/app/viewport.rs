@@ -14,6 +14,13 @@ impl StvizApp {
         let (rect, response) = ui.allocate_exact_size(ui.available_size(), egui::Sense::drag());
         self.last_viewport_points = rect;
         ui.painter().rect_filled(rect, 0.0, self.background_color);
+        if self.dataset.is_none() {
+            // Remember the viewport size so the first dataset is fitted to it.
+            let ppp = ctx.pixels_per_point();
+            self.last_viewport_px = [rect.width() * ppp, rect.height() * ppp];
+            self.ui_welcome(ui, rect);
+            return;
+        }
 
         // Interactions
         if response.dragged() {
