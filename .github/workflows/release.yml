@@ -65,11 +65,11 @@ jobs:
 
       - name: Package (Linux)
         if: runner.os == 'Linux'
-        run: ./scripts/package_ubuntu.sh
+        run: bash scripts/package_ubuntu.sh
 
       - name: Package (macOS)
         if: runner.os == 'macOS'
-        run: ./scripts/package_mac.sh
+        run: bash scripts/package_mac.sh
 
       - name: Package (Windows)
         if: runner.os == 'Windows'
