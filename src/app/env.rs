@@ -428,7 +428,7 @@ pub(super) fn windows_python_locations(
                 exe.is_file().then_some((minor, exe))
             })
             .collect();
-        found.sort_by(|a, b| b.0.cmp(&a.0));
+        found.sort_by_key(|(minor, _)| std::cmp::Reverse(*minor));
         out.extend(found.into_iter().map(|(_, exe)| exe));
     }
     out
