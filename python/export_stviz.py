@@ -710,7 +710,13 @@ def export_stviz(
                     out_data.flush()
                 finally:
                     del out_indices, out_data
-            os.replace(partial, output_path)
+            try:
+                os.replace(partial, output_path)
+            except PermissionError as e:
+                raise ConvertError(
+                    f"Could not replace {output_path.name}: it is open in another program "
+                    f"(or in another stviz-animate window). Close it and convert again."
+                ) from e
         except BaseException:
             try:
                 partial.unlink()

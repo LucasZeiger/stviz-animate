@@ -35,7 +35,14 @@ jobs:
         run: cargo test --release
 
   converter-tests:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -59,3 +66,26 @@ jobs:
 
       - name: Converter round-trip tests
         run: python python/tests/test_export_stviz.py
+
+  # What a Windows user does on first use: the app finds Python, creates its
+  # managed environment, installs the converter dependencies, generates a
+  # mock dataset and converts it, then loads the result.
+  windows-end-to-end:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: End-to-end conversion
+        run: cargo test --release -- --ignored --nocapture

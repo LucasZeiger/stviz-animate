@@ -19,10 +19,10 @@ Download the latest build for your system from [GitHub Releases](https://github.
 
 Windows:
 1) Download the `stviz-animate-windows.zip` from GitHub Releases.
-2) Extract it.
-3) Run `stviz-animate.exe`.
+2) Extract it (right-click > **Extract All...**).
+3) Run `stviz-animate.exe`. If Windows says "Windows protected your PC", click **More info** > **Run anyway** (the build is not signed).
 
-Ignore the trusted developer warning message if it shows up.
+To convert `.h5ad` files, Python 3.9 or newer needs to be installed ([python.org](https://www.python.org/downloads/)). On Windows, if it isn't, the app shows an **Install Python** button that installs it for you. Everything else is set up automatically the first time.
 
 macOS (Apple Silicon):
 1) Download `stviz-animate-mac.zip` from GitHub Releases and unzip it.
@@ -41,7 +41,7 @@ Linux (Ubuntu):
 
 ### Building it on Windows
 
-1) Install Rust (stable) and Visual Studio Build Tools.
+1) Install Rust (stable) from [rustup.rs](https://rustup.rs) and the Visual Studio Build Tools with the **Desktop development with C++** workload.
 2) Run:
 
 ```powershell
@@ -74,49 +74,25 @@ cargo run --release
 - Most controls explain themselves when you hover over them.
 
 ## Data conversion (.h5ad -> .stviz)
-- Drag a `.h5ad` file into the app or click the conversion box to pick a file. You can also start the app with a file: `stviz-animate your_data.h5ad`.
-- Progress is shown in the conversion log, and **Cancel conversion** stops it.
-- Converted files are written to `<user-data>/output/<name>.stviz`. Converting the same `.h5ad` again replaces its file; a different `.h5ad` with the same name gets a numbered file.
-- Under **Expression source** you can take gene expression from `X`, `raw` or a layer, and use a `var` column for gene names.
-- Writable runtime data lives in your user-data directory:
-  - Windows: `%APPDATA%/stviz-animate/`
-  - macOS: `~/Library/Application Support/stviz-animate/`
-  - Linux: `${XDG_DATA_HOME:-~/.local/share}/stviz-animate/`
-- The app creates and uses a managed venv at `<user-data>/.stviz_venv` for conversion and OpenCV fallback.
-- A system Python install is still required so the app can create that managed venv.
-- On first conversion/export-fallback run, dependencies are installed from `python/requirements.txt` (internet required). Later conversions work offline.
+- Drag a `.h5ad` file into the app (or click the drop box to pick one). It is converted and opened automatically.
+- The first conversion sets up the converter in the background, which needs internet once and takes a few minutes. After that, conversions work offline.
+- Converted files are kept in the app's data folder, so the same dataset opens quickly next time (see **Recent datasets**).
+- Optional: under **Expression source** you can take gene expression from `raw` or a layer instead of `X`.
 
-What gets converted:
-- Every `.obsm` entry with at least two numeric columns becomes a space (the first two dimensions are used). Cells with missing coordinates are not drawn.
-- Categorical, string and boolean `.obs` columns become categorical fields; numeric columns become continuous fields. Integer columns with up to 50 distinct values (e.g. cluster ids) are available as both.
-- Per-cell identifier columns such as barcodes are skipped.
-- The expression matrix is streamed, so memory use stays low even for large files.
-
-Manual conversion:
-
-```bash
-python -m pip install --upgrade pip setuptools wheel
-python -m pip install -r python/requirements.txt
-python python/export_stviz.py --input your_data.h5ad --output your_data.stviz --include-expr
-```
-
-Optional flags: `--layer NAME` or `--use-raw` to choose the expression matrix, and `--gene-symbols COLUMN` to take gene names from a `var` column.
-
-Requires Python 3.9+ (Python 3.10+ recommended).
+Converting from the command line, and what the converter does with each part of an `.h5ad`, is described in the [technical documentation](docs/technical_documentation.md#data-conversion-pipeline).
 
 ## Workspaces and settings
 - **Save workspace** stores the timeline (including the advanced timeline layout), colors, filters, view and export settings in a `.workspace.json` file.
 - A workspace finds its dataset at the saved path or, failing that, next to the workspace file, so the two can be moved or shared together.
-- Appearance, the last used folder and recent datasets are remembered between launches in `<user-data>/settings.json`.
+- Appearance, the last used folder and recent datasets are remembered between launches.
 
 ## Export
 - **Labels**: under *Show labels on view and exports* you can add a title, a legend for the current colouring, the space name and a scale bar. They are previewed in the viewport and drawn into screenshots and videos at any resolution. The scale bar appears on spaces with "spatial" in their name while the view rests on that space; set how many µm (or another unit) one coordinate is. Label settings are saved in workspaces.
-- Screenshot: saves a PNG to `<user-data>/output/screenshots/` at 4K (3840x2160).
-- Loop export: writes frames under `<user-data>/output/exports/` and MP4 output under `<user-data>/output/`.
-- Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.
-- `ffmpeg` is preferred if available on the user system. If missing, OpenCV fallback is auto-installed in the managed converter venv on first use.
-- If `ffmpeg` is missing, the Output panel offers an opt-in install via the system package manager (winget/choco, brew, or apt/dnf/pacman/zypper). It is off by default; internet access and possibly admin rights are required.
-- Encoding, the OpenCV fallback and the ffmpeg install run in the background, so the app stays responsive and **Cancel export** stops them.
+- **Screenshot** saves a 4K PNG and **Export loop video** an MP4, both in the app's output folder (shown after each export).
+- Videos work out of the box. If ffmpeg is installed it is used for faster, smaller files; otherwise a built-in fallback encoder is set up automatically. Encoding runs in the background and **Cancel export** stops it.
+
+## Troubleshooting
+If something doesn't work, the [technical documentation](docs/technical_documentation.md#troubleshooting) lists common problems and fixes.
 
 ## Making a release
 1) Set `version` in `Cargo.toml` (e.g. `1.1.0`) and merge it to `main`.

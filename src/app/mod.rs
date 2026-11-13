@@ -189,6 +189,9 @@ pub struct StvizApp {
     convert_gene_symbols: String,
     convert_status: Option<String>,
     convert_job: Option<convert::ConvertJob>,
+    /// A conversion that stopped because Python is missing; the Install
+    /// Python button installs it and runs this again.
+    convert_retry: Option<convert::ConvertRequest>,
     /// A .stviz being opened on a worker thread; see `start_dataset_load`.
     dataset_load: Option<dataset::DatasetLoad>,
     convert_last_python_exe: Option<String>,
@@ -575,6 +578,7 @@ impl StvizApp {
             convert_gene_symbols: String::new(),
             convert_status: None,
             convert_job: None,
+            convert_retry: None,
             dataset_load: None,
             convert_last_python_exe: None,
             convert_log_path: None,
@@ -672,6 +676,10 @@ impl Drop for StvizApp {
             job.cancel();
             let _ = job.join();
         }
+        // Release the memory-mapped dataset first: Windows cannot delete a
+        // mapped file, so a loaded mock dataset would otherwise be left behind.
+        self.dataset = None;
+        self.shared.params.lock().dataset = None;
         Self::cleanup_mock_artifacts(&self.output_dir);
         self.save_settings_if_changed(None);
     }

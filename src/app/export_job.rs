@@ -213,7 +213,7 @@ fn encode_inner(
             }
             Err(RunError::Cancelled) => return Err(RunError::Cancelled),
         }
-        (" (OpenCV)", " (kept frames)")
+        ("", " (kept frames)")
     };
 
     finalize(plan, log)?;

@@ -92,16 +92,24 @@ impl StvizApp {
                 if busy {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(if self.convert_running() {
-                            "Preparing data... progress is in the Conversion log on the left."
+                        let status = if self.convert_running() {
+                            self.convert_status.as_deref().unwrap_or("Preparing...")
                         } else {
                             "Loading dataset..."
-                        });
+                        };
+                        ui.label(status);
                     });
                     if self.convert_running() && ui.button("Cancel").clicked() {
                         self.cancel_convert();
                     }
                 } else {
+                    if self.can_install_python() {
+                        if let Some(status) = self.convert_status.clone() {
+                            ui.label(status);
+                        }
+                        self.ui_install_python_button(ui);
+                        ui.add_space(12.0);
+                    }
                     let open = ui.add_sized(
                         [220.0, 32.0],
                         egui::Button::new(egui::RichText::new("Open a dataset...").size(16.0)),
@@ -117,8 +125,7 @@ impl StvizApp {
                     if demo
                         .on_hover_text(format!(
                             "Generate a synthetic spatial dataset with {} cells and load it. \
-                             Needs Python; the first run installs the converter, which takes \
-                             a few minutes.",
+                             The first time takes a few minutes.",
                             DEMO_CELLS
                         ))
                         .clicked()

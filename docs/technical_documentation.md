@@ -1,6 +1,6 @@
 # stviz-animate Technical Documentation
 
-Last updated: 2026-11-11
+Last updated: 2026-11-13
 
 ## Table of contents
 - Overview
@@ -107,6 +107,20 @@ Expression metadata (`ExprMeta`):
 `data.rs` maps the file into memory, validates block bounds/lengths/consistency, and provides zero-copy slices. Unsupported format versions are rejected.
 
 ## Data conversion pipeline
+Design goal: users drop a `.h5ad` and it works. The managed Python environment, dependency install and progress details are kept out of the way: the UI shows short phases ("Setting up (first time only)...", "Converting... 40%"), and everything else goes to the collapsed Conversion log and `<user-data>/logs/`.
+
+User-data folder (converted files, logs, settings, the managed venv):
+- Windows: `%APPDATA%/stviz-animate/`
+- macOS: `~/Library/Application Support/stviz-animate/`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/stviz-animate/`
+
+Manual conversion:
+```
+python -m pip install -r python/requirements.txt
+python python/export_stviz.py --input your_data.h5ad --output your_data.stviz --include-expr
+```
+Optional flags: `--layer NAME` or `--use-raw` to choose the expression matrix, and `--gene-symbols COLUMN` to take gene names from a `var` column.
+
 ### `.h5ad` to `.stviz` (`python/export_stviz.py`)
 - Opens the file with `h5py` and reads only `obs`, the first two columns of each `.obsm` entry, the `*_colors` palettes and gene names (via `anndata`'s element readers). The full `AnnData` is never loaded.
 - Spaces: every `.obsm` entry with at least two numeric columns (e.g., `X_umap`, `X_pca`, `spatial`); the first two dimensions are used. Non-finite coordinates are stored as NaN (not drawn) and left out of the bbox.
@@ -232,6 +246,10 @@ Labels:
 - Output path: `<user-data>/output/screenshots/stviz-animate_screenshot_*.png`.
 - PNG encoding is lossless.
 
+### ffmpeg and the fallback encoder
+- ffmpeg is used when found (see `resolve_ffmpeg_path`). Otherwise frames are encoded with OpenCV (`python/export_video_cv2.py`), installed into the managed venv on first use, so export always works.
+- The Output panel keeps the opt-in ffmpeg install (winget/choco, brew, apt/dnf/pacman/zypper) under a collapsed **Faster video encoding** header, shown only when ffmpeg is missing. It is off by default because it runs the system package manager, which may need admin rights.
+
 ### Loop video export
 Pipeline:
 1. Render PNG frames into `<user-data>/output/exports/loop_<timestamp>/`.
@@ -271,9 +289,14 @@ Bundle notes:
 - Windows bundle can ship `ffmpeg.exe` alongside the executable.
 
 ## Configuration and environment
-Python selection:
-- Prefers active venv/conda, then system `python` / `python3`.
+Python selection (`detect_python_cmd` in `src/app/env.rs`):
+- Prefers an active venv/conda (`VIRTUAL_ENV`, `CONDA_PREFIX`), then `python3`, `python` (Linux/macOS) or `python`, `py`, `python3` (Windows; `py` is the python.org launcher, present even when Python is not on PATH).
+- On Windows it then looks in the python.org install folders (`windows_python_locations`: `%LOCALAPPDATA%\Programs\Python\Python3XY`, then `%ProgramFiles%\Python3XY`, newest first), so Python is found when it isn't on PATH and right after it was installed.
+- Interpreters older than 3.9 are rejected with a message.
+- Install Python button (Windows): when a conversion stops because no usable Python was found, the worker sets `python_missing`, the app keeps the request in `convert_retry`, and the left panel and welcome screen show **Install Python**. Clicking it runs the same request with `install_python` set: `install_python` in `src/app/convert.rs` runs `winget install -e --id Python.Python.3.12 --scope user --silent`, and if winget is missing or doesn't produce a usable Python, downloads the python.org 3.12 installer (amd64 or arm64) with PowerShell and runs it with `/quiet InstallAllUsers=0 PrependPath=1`. Both install for the current user without admin rights. The conversion then continues as usual. CI runs this for real on Windows (`installs_python_for_the_user`, ignored by default).
+- On Windows the Microsoft Store Python (`...\WindowsApps\...`) is only used if nothing else is installed: it redirects writes under AppData to a private folder, so the venv it creates is invisible to the app. If that happens the conversion stops with a message pointing to python.org.
 - Managed converter env location: `<user-data>/.stviz_venv` (auto-created and dependency-installed on first conversion/export-fallback run).
+- Every Python subprocess gets `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, so paths with non-ASCII characters print correctly on Windows (whose pipes otherwise use the legacy code page).
 
 Environment variables:
 - `STVIZ_FFMPEG`: override ffmpeg path.
@@ -304,13 +327,29 @@ Workspaces (`src/app/workspace.rs`):
 - The dataset is looked up at the saved path, then next to the workspace file by file name.
 - Opening validates the dataset and every referenced space/field before changing the current session.
 
+Subprocesses (`src/app/process.rs`):
+- `run_cancellable` (captured output) and `run_streaming` (line by line) poll the child and stop it when the job's cancel flag is set.
+- Cancel kills the whole process tree (`kill_tree`): on Linux/macOS each child runs in its own process group, which is killed as a group; on Windows `taskkill /T /F` is used. This matters on Windows, where a venv's `python.exe` is a launcher that runs the real interpreter as a child, and for pip, which starts its own children. After a cancel the output pipes are not waited on, so a surviving process can't hang the app.
+- All subprocesses are started with `CREATE_NO_WINDOW` on Windows, so no console windows flash up.
+
+Windows notes:
+- File locking: a loaded `.stviz` is memory-mapped, and Windows cannot replace or delete a mapped file. Before a conversion overwrites the loaded dataset, or a previous mock dataset is deleted, the app closes it (`release_dataset_file`); on exit the dataset is released before mock files are cleaned up. If the file is open in another stviz-animate window, the converter reports that instead of failing with a raw permission error.
+- File names: export and screenshot names are sanitised (`sanitize_file_name`): characters Windows forbids (`<>:"/\|?*`) become `_`, trailing dots/spaces are dropped and reserved names such as `CON` or `NUL` are prefixed.
+- ffmpeg: after an install through winget or Chocolatey the new PATH only reaches newly started programs, so `resolve_ffmpeg_path` also looks in `%LOCALAPPDATA%\Microsoft\WinGet\Links`, the winget package folder and `%ChocolateyInstall%\bin`.
+- Paths from `canonicalize` lose their `\\?\` prefix before being shown or stored (`display_path`).
+- CI runs the Rust tests and the converter tests on Windows, plus `windows-end-to-end`: the ignored end-to-end test, which finds Python, creates the managed venv, installs dependencies, generates a mock dataset, converts and loads it.
+
 ## Troubleshooting
-- ffmpeg missing: ensure `ffmpeg` is on PATH or bundle it.
-- Python missing: install Python 3.9+ and add to PATH.
-- Conversion failures: the status line shows the converter's reason; the Conversion log has the details.
+- "Python is needed": on Windows click **Install Python**. If that fails (no internet, or installs blocked by policy), install Python 3.9+ from python.org yourself; the Microsoft Store version does not work. On Linux/macOS install Python 3.9+ with the system package manager, then restart the app.
+- Converter setup fails: the first conversion needs internet. Behind a proxy or firewall, install the packages yourself (`python -m pip install -r python/requirements.txt`) and start the app from that environment; it prefers an active venv or conda env. The Conversion log has the pip output.
+- Windows, "path too long" during setup: enable long paths (Settings > System > For developers > *Enable long paths*, or the `LongPathsEnabled` policy) and convert again.
+- Windows, "Could not replace ... it is open in another program": the `.stviz` is open in another stviz-animate window. Close it there and convert again.
+- Windows, conversion or export blocked or very slow: some antivirus tools scan every file the converter writes. Excluding `%APPDATA%\stviz-animate` helps.
+- Video export uses the OpenCV fallback: install ffmpeg for faster, smaller exports (`winget install Gyan.FFmpeg`, `brew install ffmpeg`, `sudo apt install ffmpeg`, or **Faster video encoding** in the Output panel). winget and Chocolatey installs are found without a restart.
 - Workspace cannot find its dataset: put the `.stviz` next to the workspace file.
 - Export artifacts: verify PNG frames to isolate encoding artifacts.
 - WSL GPU: performance may be limited vs native Windows/Linux.
+- Start over: close the app and delete the user-data folder. Converted files, logs, settings and the managed Python environment are all inside it.
 
 ## Extension points
 Common areas to modify:
