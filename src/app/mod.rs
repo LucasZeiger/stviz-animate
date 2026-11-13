@@ -28,6 +28,7 @@ mod left_panel;
 mod overlay;
 mod process;
 mod render_callback;
+mod scenes;
 mod settings;
 mod style;
 mod timeline;
@@ -256,6 +257,8 @@ pub struct StvizApp {
 
     /// Title, legend and scale bar drawn over the view and into exports.
     overlay: overlay::OverlaySettings,
+    /// Named scenes stored in the open .stviz file.
+    scenes: scenes::SceneState,
 
     // Legend / gene input
     legend_range: Option<LegendRange>,
@@ -641,6 +644,7 @@ impl StvizApp {
             sample_grid_custom_labels: Vec::new(),
 
             overlay: overlay::OverlaySettings::default(),
+            scenes: scenes::SceneState::default(),
             legend_range: None,
             active_legend_range: None,
             gene_query: String::new(),
