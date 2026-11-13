@@ -140,9 +140,69 @@ pub(super) fn continuous_obs(ds: &Dataset) -> Vec<(usize, String)> {
     })
 }
 
+/// Smallest point radius (device px) we ever draw. A sprite quad of half-size
+/// 0.5 px always covers exactly one pixel centre, so points can't drop out.
+pub(super) const MIN_POINT_RADIUS_DEVICE_PX: f32 = 0.5;
+
+/// Zoom relative to the "home" view, where the normalized dataset (extent 1)
+/// fills ~90% of the shorter viewport side. 1.0 at home, 10.0 when zoomed 10x.
+/// Independent of resolution, so the viewport, screenshots and exports agree.
+pub(super) fn zoom_relative_to_fit(pixels_per_unit: f32, viewport_px: [f32; 2]) -> f32 {
+    let fit_ppu = 0.9 * viewport_px[0].min(viewport_px[1]);
+    if !(fit_ppu > 0.0) || !pixels_per_unit.is_finite() {
+        return 1.0;
+    }
+    pixels_per_unit / fit_ppu
+}
+
+/// Point radius in device pixels.
+///
+/// `radius_device_px` is the user's radius already scaled to device pixels
+/// (DPI, export upscaling). With `auto_scale` the point keeps a fixed size in
+/// world units: it equals the manual size at the home view and grows/shrinks
+/// with zoom, capped at `auto_max_device_px`.
+pub(super) fn effective_point_radius(
+    radius_device_px: f32,
+    auto_scale: bool,
+    zoom: f32,
+    auto_max_device_px: f32,
+) -> f32 {
+    let mut r = radius_device_px;
+    if auto_scale && zoom.is_finite() && zoom > 0.0 {
+        r *= zoom;
+        let cap = auto_max_device_px.max(radius_device_px);
+        r = r.min(cap);
+    }
+    if !r.is_finite() {
+        r = radius_device_px;
+    }
+    r.max(MIN_POINT_RADIUS_DEVICE_PX)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn manual_point_radius_ignores_zoom_but_never_drops_below_half_pixel() {
+        assert_eq!(effective_point_radius(2.0, false, 50.0, 10.0), 2.0);
+        assert_eq!(effective_point_radius(0.1, false, 1.0, 10.0), 0.5);
+    }
+
+    #[test]
+    fn auto_point_radius_follows_zoom_with_cap() {
+        let vp = [1000.0, 800.0];
+        let home = 0.9 * 800.0;
+        assert!((zoom_relative_to_fit(home, vp) - 1.0).abs() < 1e-6);
+        let z = zoom_relative_to_fit(home * 4.0, vp);
+        assert!((effective_point_radius(1.0, true, z, 20.0) - 4.0).abs() < 1e-5);
+        assert_eq!(effective_point_radius(1.0, true, 100.0, 20.0), 20.0);
+        // Zooming out shrinks, but not below the visibility floor.
+        assert_eq!(effective_point_radius(1.0, true, 0.01, 20.0), 0.5);
+        // Same view at twice the resolution: zoom ratio is unchanged.
+        let z2 = zoom_relative_to_fit(home * 8.0, [2000.0, 1600.0]);
+        assert!((z2 - z).abs() < 1e-5);
+    }
     use crate::color::pack_rgba8;
 
     const EASES: [EaseMode; 4] = [

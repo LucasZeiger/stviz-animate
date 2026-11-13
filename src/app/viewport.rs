@@ -2,7 +2,9 @@
 
 use super::{
     render_callback::PointCloudCallback,
-    util::{apply_ease, contrast_color, export_phase_to_t},
+    util::{
+        apply_ease, contrast_color, effective_point_radius, export_phase_to_t, zoom_relative_to_fit,
+    },
     ColorKey, StvizApp,
 };
 use crate::render::Uniforms;
@@ -224,7 +226,12 @@ impl StvizApp {
             _pad1: [0.0; 2],
             pixels_per_unit: view_camera.pixels_per_unit,
             t: t_eased,
-            point_radius_px: self.point_radius_px * ppp, // scale with dpi so it looks consistent
+            point_radius_px: effective_point_radius(
+                self.point_radius_px * ppp, // scale with dpi so it looks consistent
+                self.point_auto_scale,
+                zoom_relative_to_fit(view_camera.pixels_per_unit, viewport_px),
+                self.point_auto_max_px * ppp,
+            ),
             mask_mode: if self.fast_render { 0.0 } else { 1.0 },
             color_t,
             _pad2: 0.0,

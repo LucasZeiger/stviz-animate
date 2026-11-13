@@ -1031,6 +1031,23 @@ impl StvizApp {
                 self.point_radius_px = manual_value;
             }
         });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.point_auto_scale, "auto-scale with zoom")
+                .on_hover_text(
+                    "Points keep their size in data space: they match the radius above \
+                     at the fitted view and grow as you zoom in.",
+                );
+            if self.point_auto_scale {
+                ui.add(
+                    egui::DragValue::new(&mut self.point_auto_max_px)
+                        .speed(0.25)
+                        .range(1.0..=64.0)
+                        .prefix("max ")
+                        .suffix(" px"),
+                )
+                .on_hover_text("Largest radius points can grow to when zoomed in.");
+            }
+        });
         if ds.meta.n_points > 0 {
             let max_cap = ds.meta.n_points as usize;
             let mut slider = egui::Slider::new(&mut self.max_draw_points, 0..=max_cap)
