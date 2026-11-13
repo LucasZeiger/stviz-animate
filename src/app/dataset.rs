@@ -519,7 +519,7 @@ impl StvizApp {
         if max_draw == 0 || indices.len() <= max_draw {
             return indices.to_vec();
         }
-        let step = (indices.len() as f32 / max_draw as f32).ceil().max(1.0) as usize;
+        let step = indices.len().div_ceil(max_draw).max(1);
         let mut out = Vec::with_capacity(max_draw);
         for (i, idx) in indices.iter().enumerate() {
             if i % step == 0 {
@@ -636,9 +636,7 @@ impl StvizApp {
             return;
         }
 
-        let step = (self.base_indices.len() as f32 / max_draw as f32)
-            .ceil()
-            .max(1.0) as usize;
+        let step = self.base_indices.len().div_ceil(max_draw).max(1);
         let mut out = Vec::with_capacity(max_draw);
         for (i, idx) in self.base_indices.iter().enumerate() {
             if i % step == 0 {

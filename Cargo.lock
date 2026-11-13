@@ -2796,6 +2796,7 @@ dependencies = [
  "image",
  "memmap2",
  "parking_lot",
+ "pollster",
  "rand 0.8.5",
  "raw-window-handle",
  "rfd",
