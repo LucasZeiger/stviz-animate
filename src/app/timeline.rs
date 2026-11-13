@@ -76,7 +76,8 @@ impl StvizApp {
             } else {
                 "Delete: locked"
             };
-            ui.checkbox(&mut self.confirm_delete_cards, delete_label);
+            ui.checkbox(&mut self.confirm_delete_cards, delete_label)
+                .on_hover_text("Unlock to allow removing keyframes. Prevents accidental deletes.");
             let remove_btn = ui
                 .add_enabled(delete_enabled, egui::Button::new("Remove key"))
                 .on_hover_text(if self.confirm_delete_cards {
@@ -108,10 +109,18 @@ impl StvizApp {
         });
 
         ui.horizontal(|ui| {
-            if ui.button("Collapse all").clicked() {
+            if ui
+                .button("Collapse all")
+                .on_hover_text("Fold every keyframe card to its header.")
+                .clicked()
+            {
                 self.key_collapsed = vec![true; self.space_path.len()];
             }
-            if ui.button("Expand all").clicked() {
+            if ui
+                .button("Expand all")
+                .on_hover_text("Show the settings of every keyframe card.")
+                .clicked()
+            {
                 self.key_collapsed = vec![false; self.space_path.len()];
             }
         });
@@ -668,12 +677,17 @@ impl StvizApp {
             ui.group(|ui| {
                 ui.label("Playback");
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Once, "Once");
-                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Loop, "Loop");
+                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Once, "Once")
+                        .on_hover_text("Play from the first to the last keyframe, then stop.");
+                    ui.selectable_value(&mut self.playback_mode, PlaybackMode::Loop, "Loop")
+                        .on_hover_text("Jump back to the first keyframe and repeat.");
                     ui.selectable_value(
                         &mut self.playback_mode,
                         PlaybackMode::PingPong,
                         "Ping-pong",
+                    )
+                    .on_hover_text(
+                        "Play forwards, then backwards. Exported loops play seamlessly.",
                     );
                 });
                 let min_speed = if self.space_path.len() > 5 {
@@ -748,7 +762,11 @@ impl StvizApp {
                                 ui.selectable_value(&mut self.reset_view_key_idx, i, label);
                             }
                         });
-                    if ui.button("Reset").clicked() {
+                    if ui
+                        .button("Reset")
+                        .on_hover_text("Fit the view to the points of the chosen keyframe.")
+                        .clicked()
+                    {
                         let (active_from, active_to, _color_from, _color_to, segment_t, _seg_idx) =
                             self.current_segment(ds_ref);
                         let mut from_override: Option<Arc<Vec<f32>>> = None;
@@ -861,7 +879,11 @@ impl StvizApp {
                     .speed(0.001)
                     .range(0.0..=1.0),
             );
-            ui.checkbox(&mut self.color_path_enabled, "Use color keys");
+            ui.checkbox(&mut self.color_path_enabled, "Use color keys")
+                .on_hover_text(
+                    "Use each keyframe's Color setting. Off: keep the colouring chosen \
+                     in the left panel for the whole animation.",
+                );
         });
     }
 }

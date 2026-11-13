@@ -287,6 +287,10 @@ Persistent settings:
 Command line:
 - `stviz-animate <file.h5ad|file.stviz>` opens the file at startup.
 
+First-run help (`src/app/help.rs`):
+- `ui_welcome` replaces the viewport while no dataset is loaded: open a file, generate demo data, recent datasets, a short guide, and conversion progress with Cancel.
+- `ui_top_bar` holds the app version, **Open data...** and **Shortcuts (?)**. `ui_shortcuts_window` lists `SHORTCUTS` and is toggled with `?`/`F1` in `handle_hotkeys`; Esc closes it first.
+
 Workspaces (`src/app/workspace.rs`):
 - JSON, `version: 1`; fields added later are optional so older files still open.
 - Stores keyframes, colors, filters, view, sample grid, export settings and the advanced timeline layout (card positions, sizes, durations, connections).

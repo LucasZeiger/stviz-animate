@@ -19,6 +19,7 @@ mod dataset;
 mod env;
 mod export;
 mod export_job;
+mod help;
 mod input;
 mod keyframes;
 mod layout;
@@ -258,6 +259,8 @@ pub struct StvizApp {
     settings_checked_at: f64,
     last_dir: Option<PathBuf>,
     recent_files: Vec<PathBuf>,
+    /// Keyboard shortcuts window, toggled with ? or F1.
+    show_shortcuts: bool,
     /// A file passed on the command line, opened on the first frame.
     startup_file: Option<PathBuf>,
     // Open path fallback + status
@@ -633,6 +636,7 @@ impl StvizApp {
             settings_checked_at: f64::NEG_INFINITY,
             last_dir: None,
             recent_files: Vec::new(),
+            show_shortcuts: false,
             // `stviz-animate <file>` (or "Open with...") opens a .h5ad/.stviz.
             startup_file: std::env::args_os().nth(1).map(PathBuf::from),
             open_path: String::new(),
@@ -716,13 +720,12 @@ impl eframe::App for StvizApp {
             });
             self.viewport_fullscreen_overlay(ctx);
             self.ui_advanced_timeline(ctx);
+            self.ui_shortcuts_window(ctx);
             return;
         }
 
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.label("GPU point transitions");
-            });
+            self.ui_top_bar(ui);
         });
 
         egui::SidePanel::left("left_panel")
@@ -750,6 +753,7 @@ impl eframe::App for StvizApp {
             self.ui_viewport(ui, ctx);
         });
         self.ui_advanced_timeline(ctx);
+        self.ui_shortcuts_window(ctx);
 
         if self.convert_running() || self.dataset_load.is_some() {
             ctx.request_repaint_after(self.main_view_frame_interval());

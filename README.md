@@ -62,6 +62,11 @@ sudo apt-get install -y libgtk-3-dev
 cargo run --release
 ```
 
+## First steps
+- With no dataset loaded, the view shows a welcome screen: **Open a dataset...**, **Try demo data** (a 50,000-cell synthetic spatial dataset; needs Python), your recent datasets and a three-step guide.
+- **Open data...** and **Shortcuts (?)** sit in the top bar. Press `?` or `F1` for the shortcut list: Space plays and pauses, the arrow keys step through frames, Esc leaves fullscreen, drag pans and scroll zooms.
+- Most controls explain themselves when you hover over them.
+
 ## Data conversion (.h5ad -> .stviz)
 - Drag a `.h5ad` file into the app or click the conversion box to pick a file. You can also start the app with a file: `stviz-animate your_data.h5ad`.
 - Progress is shown in the conversion log, and **Cancel conversion** stops it.

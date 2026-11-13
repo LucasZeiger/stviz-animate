@@ -49,8 +49,13 @@ impl StvizApp {
         if ctx.wants_keyboard_input() {
             return;
         }
+        if ctx.input(|i| i.key_pressed(egui::Key::Questionmark) || i.key_pressed(egui::Key::F1)) {
+            self.show_shortcuts = !self.show_shortcuts;
+        }
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
-            if self.viewport_fullscreen {
+            if self.show_shortcuts {
+                self.show_shortcuts = false;
+            } else if self.viewport_fullscreen {
                 self.viewport_fullscreen = false;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
             } else if self.fullscreen {
