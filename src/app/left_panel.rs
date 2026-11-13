@@ -2,6 +2,7 @@
 
 use super::{
     convert::ExprSource,
+    env::sanitize_file_name,
     export::SCREENSHOT_RESOLUTION,
     export_job::ExportJobKind,
     util::{
@@ -1165,10 +1166,13 @@ impl StvizApp {
                 .clicked()
             {
                 let ts = chrono_like_timestamp();
-                let mut stem = self.screenshot_name.trim().to_string();
-                if stem.is_empty() {
-                    stem = "stviz-animate_screenshot".to_string();
-                }
+                let mut stem = sanitize_file_name(
+                    self.screenshot_name
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(""),
+                    "stviz-animate_screenshot",
+                );
                 if stem.to_ascii_lowercase().ends_with(".png") {
                     stem.truncate(stem.len().saturating_sub(4));
                 }

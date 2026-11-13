@@ -672,6 +672,10 @@ impl Drop for StvizApp {
             job.cancel();
             let _ = job.join();
         }
+        // Release the memory-mapped dataset first: Windows cannot delete a
+        // mapped file, so a loaded mock dataset would otherwise be left behind.
+        self.dataset = None;
+        self.shared.params.lock().dataset = None;
         Self::cleanup_mock_artifacts(&self.output_dir);
         self.save_settings_if_changed(None);
     }

@@ -174,6 +174,37 @@ def test_errors_are_clear_and_leave_no_partial_file():
     assert list(tmp.glob("*.partial")) == []
 
 
+def test_replacing_a_file_that_is_in_use_gives_a_clear_error():
+    """On Windows a memory-mapped file (an open .stviz in the app) cannot be replaced."""
+    if sys.platform != "win32":
+        return
+    import mmap
+
+    adata, _ = make_adata()
+    tmp = Path(tempfile.mkdtemp(prefix="stviz_test_"))
+    src, out = tmp / "in.h5ad", tmp / "out.stviz"
+    adata.write_h5ad(src)
+    ex.export_stviz(src, out, False)
+    with open(out, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ):
+        try:
+            ex.export_stviz(src, out, False)
+        except ex.ConvertError as e:
+            assert "open in another program" in str(e)
+        else:
+            raise AssertionError("expected ConvertError")
+    assert list(tmp.glob("*.partial")) == []
+
+
+def test_unicode_paths():
+    adata, _ = make_adata()
+    tmp = Path(tempfile.mkdtemp(prefix="stviz_tëst_ü_"))
+    src, out = tmp / "zellen_ä.h5ad", tmp / "ausgabe_ö.stviz"
+    adata.write_h5ad(src)
+    ex.export_stviz(src, out, True)
+    meta, _, _ = read_stviz(out)
+    assert meta["n_points"] == adata.n_obs
+
+
 def test_parse_color():
     assert ex.parse_color("#fff") == 0xFFFFFFFF
     assert ex.parse_color("Grey") == 0xFF808080

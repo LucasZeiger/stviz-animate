@@ -5,6 +5,7 @@
 //! environment on first use.
 
 use super::{
+    env::display_path,
     process::{run_cancellable, run_streaming, RunError},
     util::chrono_like_timestamp,
     StvizApp,
@@ -203,6 +204,14 @@ fn ensure_converter_env(
         cmd.arg("-m").arg("venv").arg(venv_dir);
         StvizApp::apply_python_env(&mut cmd, StvizApp::python_env_root(&python_cmd).as_deref());
         setup_step(&mut cmd, "create the converter environment", log, cancel)?;
+        if !venv_python.exists() {
+            return Err(RunError::Failed(format!(
+                "The converter environment was created, but {} is missing. This happens \
+                 with the Microsoft Store version of Python; install Python from \
+                 python.org and convert again.",
+                venv_python.display()
+            )));
+        }
     }
 
     let mut check = Command::new(&venv_python);
@@ -432,10 +441,8 @@ impl StvizApp {
             return;
         }
         self.remember_dir_of(path);
-        let source = std::fs::canonicalize(path)
-            .unwrap_or_else(|_| path.to_path_buf())
-            .display()
-            .to_string();
+        let source =
+            display_path(&std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()));
         let output = self.convert_output_for(path, &source);
         self.release_dataset_file(&output);
         let log_path = self
@@ -512,14 +519,14 @@ impl StvizApp {
         pick_convert_output(&self.output_dir, stem, source)
     }
 
-    /// On Windows a memory-mapped file cannot be replaced, so close the loaded
-    /// dataset if the conversion is about to overwrite it.
-    fn release_dataset_file(&mut self, output: &Path) {
+    /// On Windows a memory-mapped file cannot be replaced or deleted, so close
+    /// the loaded dataset if it is about to be overwritten or removed.
+    pub(super) fn release_dataset_file(&mut self, file: &Path) {
         if !cfg!(windows) {
             return;
         }
-        let same = match (self.dataset_path.as_ref(), std::fs::canonicalize(output)) {
-            (Some(loaded), Ok(out)) => std::fs::canonicalize(loaded).is_ok_and(|p| p == out),
+        let same = match (self.dataset_path.as_ref(), std::fs::canonicalize(file)) {
+            (Some(loaded), Ok(file)) => std::fs::canonicalize(loaded).is_ok_and(|p| p == file),
             _ => false,
         };
         if same {
@@ -550,6 +557,7 @@ impl StvizApp {
             .into_iter()
             .flatten()
         {
+            self.release_dataset_file(&path);
             if Self::path_within_root(&self.output_dir, &path) {
                 let _ = std::fs::remove_file(path);
             }

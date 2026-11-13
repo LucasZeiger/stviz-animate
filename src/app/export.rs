@@ -101,8 +101,7 @@ impl StvizApp {
     pub(super) fn abort_direct_video_export(&mut self) {
         if let Some(mut direct) = self.direct_video_export.take() {
             direct.stdin.take();
-            let _ = direct.child.kill();
-            let _ = direct.child.wait();
+            super::process::kill_tree(&mut direct.child);
         }
     }
 

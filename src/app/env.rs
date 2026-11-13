@@ -16,20 +16,38 @@ impl StvizApp {
             }
         }
 
-        let candidates = ["python", "python3"];
-        for candidate in candidates {
+        // `py` is the python.org launcher, present even when Python was
+        // installed without being added to PATH.
+        let candidates: &[&str] = if cfg!(windows) {
+            &["python", "py", "python3"]
+        } else {
+            &["python3", "python"]
+        };
+        // The Microsoft Store Python redirects writes under AppData to a
+        // private folder, so the app cannot find the environment it creates
+        // there. Use it only if nothing else is installed.
+        let mut store_python = None;
+        for &candidate in candidates {
             match Self::check_python_cmd(candidate) {
+                Ok(result) if is_store_python(&result.1) => {
+                    store_python.get_or_insert(result);
+                }
                 Ok(result) => return Ok(result),
                 Err(msg) => errors.push(msg),
             }
         }
-        let hint = "If Python is installed but not found, run:\n\
-  python -c \"import sys; print(sys.executable)\"\n\
-Then add that path to your system environment variables (PATH).";
+        if let Some(result) = store_python {
+            return Ok(result);
+        }
+        let hint = if cfg!(windows) {
+            "Install Python 3.9 or newer from python.org (tick \"Add python.exe to PATH\"), \
+             then restart the app. The Microsoft Store shortcut named `python` is not enough."
+        } else {
+            "Install Python 3.9 or newer (e.g. `sudo apt install python3 python3-venv`, or \
+             python.org on macOS), then restart the app."
+        };
         if errors.is_empty() {
-            Err(format!(
-                "Python not found. Install Python and ensure `python` or `python3` is on PATH.\n{hint}"
-            ))
+            Err(format!("Python not found.\n{hint}"))
         } else {
             Err(format!("{}\n\n{hint}", errors.join("\n")))
         }
@@ -165,6 +183,10 @@ Then add that path to your system environment variables (PATH).";
 
     pub(super) fn managed_export_output_path(&self) -> PathBuf {
         let raw = self.export_name.trim();
+        // Keep only the last path component, whichever separator was typed.
+        let raw = raw.rsplit(['/', '\\']).next().unwrap_or(raw);
+        let raw = sanitize_file_name(raw, "");
+        let raw = raw.as_str();
         let mut file_name = if raw.is_empty() {
             String::from("stviz-animate_loop.mp4")
         } else {
@@ -240,6 +262,21 @@ Then add that path to your system environment variables (PATH).";
         candidates.push(project_dir.join("ffmpeg").join("ffmpeg.exe"));
         candidates.push(project_dir.join("ffmpeg").join("bin").join("ffmpeg"));
         candidates.push(project_dir.join("ffmpeg").join("bin").join("ffmpeg.exe"));
+        // Where winget and Chocolatey put ffmpeg. Their PATH changes only reach
+        // newly started programs, so look there directly after an install.
+        if cfg!(windows) {
+            if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+                let winget = PathBuf::from(local).join("Microsoft").join("WinGet");
+                candidates.push(winget.join("Links").join("ffmpeg.exe"));
+                if let Some(path) = find_winget_ffmpeg(&winget.join("Packages")) {
+                    candidates.push(path);
+                }
+            }
+            let choco = std::env::var_os("ChocolateyInstall")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData\chocolatey"));
+            candidates.push(choco.join("bin").join("ffmpeg.exe"));
+        }
 
         for candidate in candidates {
             if candidate.exists() {
@@ -267,6 +304,10 @@ Then add that path to your system environment variables (PATH).";
 
     pub(super) fn apply_python_env(cmd: &mut Command, env_root: Option<&Path>) -> Option<String> {
         Self::apply_subprocess_flags(cmd);
+        // Piped output on Windows defaults to the legacy code page, where
+        // printing a path with non-ASCII characters raises an error.
+        cmd.env("PYTHONIOENCODING", "utf-8");
+        cmd.env("PYTHONUTF8", "1");
         let env_root = env_root?;
 
         cmd.env_remove("PYTHONHOME");
@@ -327,6 +368,10 @@ Then add that path to your system environment variables (PATH).";
     pub(super) fn python_env_root(python_cmd: &str) -> Option<PathBuf> {
         let path = PathBuf::from(python_cmd);
         let parent = path.parent()?.to_path_buf();
+        // A bare command name ("python") is found via PATH and has no env root.
+        if parent.as_os_str().is_empty() {
+            return None;
+        }
         if let Some(dir_name) = parent.file_name().and_then(|s| s.to_str()) {
             if dir_name.eq_ignore_ascii_case("scripts") || dir_name.eq_ignore_ascii_case("bin") {
                 return parent.parent().map(|p| p.to_path_buf());
@@ -344,5 +389,99 @@ Then add that path to your system environment variables (PATH).";
     }
 }
 
+/// `ffmpeg.exe` inside a winget package folder (Gyan.FFmpeg*), if installed.
+fn find_winget_ffmpeg(packages: &Path) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(packages).ok()?;
+    for pkg in entries.flatten() {
+        let name = pkg.file_name().to_string_lossy().to_ascii_lowercase();
+        if !name.starts_with("gyan.ffmpeg") {
+            continue;
+        }
+        // Layout: <package>/ffmpeg-<version>-<build>/bin/ffmpeg.exe
+        for build in std::fs::read_dir(pkg.path()).ok()?.flatten() {
+            let exe = build.path().join("bin").join("ffmpeg.exe");
+            if exe.is_file() {
+                return Some(exe);
+            }
+        }
+    }
+    None
+}
+
+/// Whether an interpreter path is the Microsoft Store Python (or its alias).
+fn is_store_python(exe: &str) -> bool {
+    let lower = exe.to_ascii_lowercase().replace('/', "\\");
+    lower.contains("\\windowsapps\\")
+}
+
+/// Replace characters Windows does not allow in file names (and control
+/// characters) with `_`, and avoid reserved device names such as `CON` or
+/// `NUL`. Applied on every platform so files can be copied to Windows.
+pub(super) fn sanitize_file_name(name: &str, fallback: &str) -> String {
+    let mut out: String = name
+        .trim()
+        .chars()
+        .map(|c| match c {
+            '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+            c if c.is_control() => '_',
+            c => c,
+        })
+        .collect();
+    // Windows silently drops trailing dots and spaces.
+    let trimmed_len = out.trim_end_matches(['.', ' ']).len();
+    out.truncate(trimmed_len);
+    if out.is_empty() {
+        return fallback.to_string();
+    }
+    let stem = out.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && stem.as_bytes()[3].is_ascii_digit());
+    if reserved {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Drop the `\\?\` prefix `canonicalize` adds on Windows, for display.
+pub(super) fn display_path(path: &Path) -> String {
+    let s = path.display().to_string();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) if !rest.starts_with("UNC\\") => rest.to_string(),
+        _ => s,
+    }
+}
+
 /// The converter's dependencies (anndata, numpy) no longer support older Pythons.
 const MIN_PYTHON_VERSION: (u32, u32) = (3, 9);
+
+#[cfg(test)]
+mod tests {
+    use super::{display_path, is_store_python, sanitize_file_name};
+    use std::path::Path;
+
+    #[test]
+    fn file_names_are_made_safe_for_windows() {
+        assert_eq!(sanitize_file_name("my video.mp4", "x"), "my video.mp4");
+        assert_eq!(sanitize_file_name("a:b*c?.mp4", "x"), "a_b_c_.mp4");
+        assert_eq!(sanitize_file_name("final.  ", "x"), "final");
+        assert_eq!(sanitize_file_name("   ", "x"), "x");
+        assert_eq!(sanitize_file_name("con.mp4", "x"), "_con.mp4");
+        assert_eq!(sanitize_file_name("COM3", "x"), "_COM3");
+        assert_eq!(sanitize_file_name("console.mp4", "x"), "console.mp4");
+    }
+
+    #[test]
+    fn store_python_and_verbatim_paths_are_recognised() {
+        assert!(is_store_python(
+            r"C:\Users\a\AppData\Local\Microsoft\WindowsApps\python.exe"
+        ));
+        assert!(!is_store_python(r"C:\Python312\python.exe"));
+        assert_eq!(
+            display_path(Path::new(r"\\?\C:\data\a.h5ad")),
+            r"C:\data\a.h5ad"
+        );
+        assert_eq!(display_path(Path::new("/data/a.h5ad")), "/data/a.h5ad");
+    }
+}
