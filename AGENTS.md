@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `src/`: Rust application code (UI, rendering, data loading).
+- `src/`: Rust application code (UI, rendering, data loading). The app lives in `src/app/`, one file per area (panels, timeline, export, conversion, ...); see `docs/technical_documentation.md`.
 - `python/`: dataset/export utilities (`export_stviz.py`, `export_video_cv2.py`, `mock_spatial_dataset.py`).
 - `assets/`: shaders and icons.
 - `data/`: sample datasets (if present).
@@ -17,7 +17,8 @@
 - `cargo run --release` — optimized build for performance testing.
 - `cargo build --release` — produce a release binary without running.
 - `cargo fmt` — format Rust code with rustfmt (if installed).
-- `cargo test` — run tests if/when added.
+- `cargo test` — run the Rust unit tests (`cargo test -- --ignored` adds the end-to-end conversion test; needs Python and internet).
+- `python python/tests/test_export_stviz.py` — run the converter round-trip tests.
 - `python python/export_stviz.py --input file.h5ad --output file.stviz` — convert datasets manually.
 - `powershell -ExecutionPolicy Bypass -File scripts\package_windows.ps1` — Windows packaging.
 - `cargo install cargo-bundle` — install macOS packaging helper (one-time).
@@ -30,7 +31,7 @@
 - UI strings: keep labels concise and consistent (e.g., "Open .stviz", "Apply gene").
 
 ## Testing Guidelines
-- No automated tests currently. Use `cargo test` if/when tests are added.
+- Unit tests live in a `#[cfg(test)] mod tests` next to the code they cover (e.g. `src/app/util.rs`); run them with `cargo test`.
 - For UI changes, run the app and validate interactions (timeline, filters, gene coloring).
 - If adding tests, prefer module-level tests in the relevant `src/*.rs` file.
 

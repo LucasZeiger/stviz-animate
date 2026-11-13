@@ -64,6 +64,9 @@ pub struct ExprMeta {
 pub struct StvizMeta {
     pub version: u32,
     pub n_points: u32,
+    /// The file this was converted from, when the converter recorded it.
+    #[serde(default)]
+    pub source: Option<String>,
     pub spaces: Vec<SpaceMeta>,
     pub obs: Vec<ObsMeta>,
     pub expr: Option<ExprMeta>,
@@ -79,6 +82,12 @@ pub struct Dataset {
 impl Dataset {
     pub fn load(path: &Path) -> anyhow::Result<Arc<Self>> {
         let file = File::open(path).with_context(|| format!("open: {}", path.display()))?;
+        if file.metadata().map(|m| m.len() == 0).unwrap_or(false) {
+            return Err(anyhow!("the file is empty: {}", path.display()));
+        }
+        // Safety: the mapping is read-only. The converter never modifies a
+        // .stviz in place (it writes a new file and renames it over the old
+        // one), so the mapped bytes do not change underneath us.
         let mmap = unsafe { Mmap::map(&file).context("mmap")? };
 
         let (json_start, json_len, header_version) = Self::parse_header(&mmap)?;
@@ -87,8 +96,10 @@ impl Dataset {
             return Err(anyhow!("invalid json length in header"));
         }
 
-        let meta: StvizMeta =
-            serde_json::from_slice(&mmap[json_start..json_end]).context("parse meta json")?;
+        let meta: StvizMeta = serde_json::from_slice(&mmap[json_start..json_end]).context(
+            "the file's metadata could not be read (it may be damaged or from an \
+             incompatible converter; try converting the .h5ad again)",
+        )?;
         if meta.version != STVIZ_VERSION {
             return Err(anyhow!(
                 "unsupported .stviz metadata version {} (expected {})",
@@ -132,6 +143,27 @@ impl Dataset {
         ds.validate_layout()?;
 
         Ok(Arc::new(ds))
+    }
+
+    /// Read only the `source` recorded in a .stviz file's metadata.
+    pub fn peek_source(path: &Path) -> Option<String> {
+        use std::io::Read;
+        #[derive(Deserialize)]
+        struct SourceOnly {
+            #[serde(default)]
+            source: Option<String>,
+        }
+        const MAX_META_BYTES: usize = 512 << 20;
+        let mut file = File::open(path).ok()?;
+        let mut header = [0u8; HEADER_BYTES_WITH_MAGIC];
+        file.read_exact(&mut header).ok()?;
+        let (_start, json_len, _version) = Self::parse_header(&header).ok()?;
+        if !header.starts_with(&STVIZ_MAGIC) || json_len > MAX_META_BYTES {
+            return None;
+        }
+        let mut json = vec![0u8; json_len];
+        file.read_exact(&mut json).ok()?;
+        serde_json::from_slice::<SourceOnly>(&json).ok()?.source
     }
 
     fn parse_header(mmap: &[u8]) -> anyhow::Result<(usize, usize, Option<u32>)> {
@@ -486,5 +518,167 @@ impl Dataset {
             }
         }
         Ok(out)
+    }
+}
+
+/// Builds small .stviz files for tests.
+#[cfg(test)]
+pub mod test_support {
+    use super::{HEADER_BYTES_WITH_MAGIC, STVIZ_MAGIC, STVIZ_VERSION};
+    use std::path::Path;
+
+    /// Metadata and data section for `n` points: spaces "spatial" and "X_umap",
+    /// a categorical "leiden" (3 categories), a continuous "score", and one
+    /// gene "G0" expressed in every cell.
+    pub fn stviz_parts(n: u32, source: Option<&str>) -> (serde_json::Value, Vec<u8>) {
+        let n = n as usize;
+        let mut data = Vec::new();
+        let mut push = |bytes: Vec<u8>| {
+            let off = data.len();
+            data.extend_from_slice(&bytes);
+            (off, bytes.len())
+        };
+        let f32s = |v: Vec<f32>| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+        let u32s = |v: Vec<u32>| v.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>();
+
+        let spatial = push(f32s((0..n * 2).map(|i| i as f32).collect()));
+        let umap = push(f32s((0..n * 2).map(|i| -(i as f32)).collect()));
+        let leiden = push(u32s((0..n).map(|i| (i % 3) as u32).collect()));
+        let score = push(f32s((0..n).map(|i| i as f32 * 0.5).collect()));
+        let indptr = push(u32s(vec![0, n as u32]));
+        let indices = push(u32s((0..n as u32).collect()));
+        let expr = push(f32s((0..n).map(|i| i as f32 + 1.0).collect()));
+        let hi = (n * 2).saturating_sub(1) as f32;
+        let meta = serde_json::json!({
+            "version": STVIZ_VERSION,
+            "n_points": n,
+            "source": source,
+            "spaces": [
+                {"name": "spatial", "dims": 2, "offset": spatial.0, "len_bytes": spatial.1,
+                 "bbox": [0.0, 1.0, hi - 1.0, hi]},
+                {"name": "X_umap", "dims": 2, "offset": umap.0, "len_bytes": umap.1,
+                 "bbox": [1.0 - hi, -hi, 0.0, -1.0]},
+            ],
+            "obs": [
+                {"kind": "categorical", "name": "leiden", "offset": leiden.0,
+                 "len_bytes": leiden.1, "categories": ["0", "1", "2"], "palette_rgba8": null},
+                {"kind": "continuous", "name": "score", "offset": score.0, "len_bytes": score.1},
+            ],
+            "expr": {
+                "kind": "csc", "n_genes": 1, "nnz": n, "var_names": ["G0"],
+                "indptr_offset": indptr.0, "indptr_len_bytes": indptr.1,
+                "indices_offset": indices.0, "indices_len_bytes": indices.1,
+                "data_offset": expr.0, "data_len_bytes": expr.1,
+            },
+        });
+        (meta, data)
+    }
+
+    pub fn encode_stviz(meta: &serde_json::Value, data: &[u8]) -> Vec<u8> {
+        let json = serde_json::to_vec(meta).unwrap();
+        let mut out = Vec::new();
+        out.extend_from_slice(&STVIZ_MAGIC);
+        out.extend_from_slice(&STVIZ_VERSION.to_le_bytes());
+        out.extend_from_slice(&(json.len() as u64).to_le_bytes());
+        out.extend_from_slice(&json);
+        debug_assert_eq!(out.len(), HEADER_BYTES_WITH_MAGIC + json.len());
+        while out.len() % 16 != 0 {
+            out.push(0);
+        }
+        out.extend_from_slice(data);
+        out
+    }
+
+    pub fn write_stviz(path: &Path, n: u32, source: Option<&str>) {
+        let (meta, data) = stviz_parts(n, source);
+        std::fs::write(path, encode_stviz(&meta, &data)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{test_support::*, Dataset};
+    use std::path::PathBuf;
+
+    fn temp_file(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("stviz_data_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(name)
+    }
+
+    fn load_err(name: &str, bytes: &[u8]) -> String {
+        let path = temp_file(name);
+        std::fs::write(&path, bytes).unwrap();
+        match Dataset::load(&path) {
+            Ok(_) => panic!("{name} should not load"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    #[test]
+    fn loads_a_valid_file() {
+        let path = temp_file("valid.stviz");
+        write_stviz(&path, 6, Some("/data/a.h5ad"));
+        let ds = Dataset::load(&path).unwrap();
+        assert_eq!(ds.meta.n_points, 6);
+        assert_eq!(ds.meta.source.as_deref(), Some("/data/a.h5ad"));
+        assert_eq!(Dataset::peek_source(&path).as_deref(), Some("/data/a.h5ad"));
+        assert_eq!(ds.space_f32_2d(0).unwrap().len(), 12);
+        let (name, labels, categories, palette) = ds.obs_categorical(0).unwrap();
+        assert_eq!((name, labels.len(), categories.len()), ("leiden", 6, 3));
+        assert!(palette.is_none());
+        assert_eq!(ds.obs_continuous(1).unwrap().1[2], 1.0);
+        assert!(ds.obs_continuous(0).is_err());
+        let gene = ds.find_gene("G0").unwrap();
+        assert_eq!(
+            ds.gene_vector_csc(gene).unwrap(),
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+        );
+        assert!(ds.find_gene("missing").is_none());
+    }
+
+    #[test]
+    fn peek_source_is_none_without_a_source() {
+        let path = temp_file("nosource.stviz");
+        write_stviz(&path, 3, None);
+        assert_eq!(Dataset::peek_source(&path), None);
+        assert_eq!(
+            Dataset::peek_source(&temp_file("does-not-exist.stviz")),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_damaged_files() {
+        let (meta, data) = stviz_parts(6, None);
+        let good = encode_stviz(&meta, &data);
+
+        assert!(load_err("empty.stviz", b"").contains("empty"));
+        assert!(load_err("tiny.stviz", b"abc").contains("too small"));
+        assert!(!load_err("garbage.stviz", &[0xFFu8; 64]).is_empty());
+        // Truncated data section.
+        assert!(load_err("short.stviz", &good[..good.len() - 8]).contains("out of file bounds"));
+
+        let mut wrong_version = good.clone();
+        wrong_version[8] = 9;
+        assert!(load_err("version.stviz", &wrong_version).contains("unsupported"));
+
+        let mut bad = meta.clone();
+        bad["n_points"] = 7.into();
+        assert!(load_err("points.stviz", &encode_stviz(&bad, &data)).contains("len_bytes"));
+
+        let mut bad = meta.clone();
+        bad["spaces"] = serde_json::json!([]);
+        assert!(load_err("nospaces.stviz", &encode_stviz(&bad, &data)).contains("no spaces"));
+
+        let mut bad = meta.clone();
+        bad["expr"]["nnz"] = 5.into();
+        assert!(load_err("nnz.stviz", &encode_stviz(&bad, &data)).contains("expr"));
+
+        // A gene's cell index pointing past the last cell.
+        let off = meta["expr"]["indices_offset"].as_u64().unwrap() as usize;
+        let mut bad_data = data.clone();
+        bad_data[off..off + 4].copy_from_slice(&99u32.to_le_bytes());
+        assert!(load_err("indices.stviz", &encode_stviz(&meta, &bad_data)).contains("out of range"));
     }
 }

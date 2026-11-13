@@ -7,12 +7,17 @@ on:
 
 jobs:
   release-checks:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev
@@ -29,9 +34,28 @@ jobs:
       - name: Release tests
         run: cargo test --release
 
+  converter-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: python/requirements.txt
+
+      - name: Install converter dependencies
+        run: python -m pip install -r python/requirements.txt
+
       - name: Python syntax checks
         run: |
-          python3 -m py_compile \
+          python -m py_compile \
             python/export_stviz.py \
             python/mock_spatial_dataset.py \
             python/export_video_cv2.py
+
+      - name: Converter round-trip tests
+        run: python python/tests/test_export_stviz.py

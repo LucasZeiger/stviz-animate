@@ -107,6 +107,63 @@ pub fn pack_rgba8(r: u8, g: u8, b: u8, a: u8) -> u32 {
     (r as u32) | ((g as u32) << 8) | ((b as u32) << 16) | ((a as u32) << 24)
 }
 
+/// The range to map onto a gradient: the finite min/max of `values`, or their
+/// 1st-99th percentiles when `clip` is set so a few outliers don't flatten
+/// the scale. `None` if there are no finite values.
+pub fn value_range(values: &[f32], clip: bool) -> Option<(f32, f32)> {
+    let mut vmin = f32::INFINITY;
+    let mut vmax = f32::NEG_INFINITY;
+    for &v in values {
+        if v.is_finite() {
+            vmin = vmin.min(v);
+            vmax = vmax.max(v);
+        }
+    }
+    if vmin > vmax {
+        return None;
+    }
+    if clip {
+        // A sample is plenty for percentiles and keeps this fast on big datasets.
+        const MAX_SAMPLE: usize = 200_000;
+        let step = values.len().div_ceil(MAX_SAMPLE).max(1);
+        let mut sample: Vec<f32> = values
+            .iter()
+            .step_by(step)
+            .copied()
+            .filter(|v| v.is_finite())
+            .collect();
+        if sample.len() >= 100 {
+            let last = sample.len() - 1;
+            let lo_idx = last / 100;
+            let hi_idx = last - last / 100;
+            let (_, lo, _) = sample.select_nth_unstable_by(lo_idx, f32::total_cmp);
+            let lo = *lo;
+            let (_, hi, _) = sample.select_nth_unstable_by(hi_idx, f32::total_cmp);
+            let hi = *hi;
+            if lo < hi {
+                return Some((lo, hi));
+            }
+        }
+    }
+    Some((vmin, vmax))
+}
+
+/// Upper end of the colour scale for a gene (the scale starts at 0). With
+/// `clip`, the 99th percentile of the expressing cells.
+pub fn gene_vmax(values: &[f32], clip: bool) -> f32 {
+    let vmax = if clip {
+        let positive: Vec<f32> = values
+            .iter()
+            .copied()
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .collect();
+        value_range(&positive, true).map(|r| r.1)
+    } else {
+        value_range(values, false).map(|r| r.1)
+    };
+    vmax.unwrap_or(0.0).max(1e-6)
+}
+
 pub fn gradient_map(values: &[f32], vmin: f32, vmax: f32, grad: &Gradient) -> Vec<u32> {
     let den = (vmax - vmin).max(1e-12);
     values
@@ -165,5 +222,44 @@ pub fn categorical_palette_named(name: &str, n: usize) -> Vec<u32> {
         "pastel1" => palette_from_colors(&colorous::PASTEL1, n),
         "pastel2" => palette_from_colors(&colorous::PASTEL2, n),
         _ => categorical_palette(n),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{gene_vmax, value_range};
+
+    #[test]
+    fn value_range_ignores_non_finite_values() {
+        assert_eq!(value_range(&[], false), None);
+        assert_eq!(value_range(&[f32::NAN, f32::INFINITY], false), None);
+        assert_eq!(
+            value_range(&[3.0, f32::NAN, -1.0], false),
+            Some((-1.0, 3.0))
+        );
+    }
+
+    #[test]
+    fn clipping_drops_outliers_but_keeps_constant_data_usable() {
+        let mut values: Vec<f32> = (0..1000).map(|i| i as f32 / 1000.0).collect();
+        values.push(1.0e6);
+        assert_eq!(value_range(&values, false).unwrap().1, 1.0e6);
+        let (lo, hi) = value_range(&values, true).unwrap();
+        assert!(lo > 0.0 && lo < 0.05 && hi > 0.95 && hi < 1.0, "{lo} {hi}");
+        // All equal: percentiles collapse, so fall back to the plain range.
+        assert_eq!(value_range(&[2.0; 500], true), Some((2.0, 2.0)));
+    }
+
+    #[test]
+    fn gene_vmax_uses_expressing_cells_when_clipping() {
+        let mut values = vec![0.0f32; 10_000];
+        for (i, v) in values.iter_mut().take(200).enumerate() {
+            *v = 1.0 + i as f32 / 200.0;
+        }
+        values[0] = 500.0;
+        assert_eq!(gene_vmax(&values, false), 500.0);
+        let clipped = gene_vmax(&values, true);
+        assert!(clipped > 1.9 && clipped < 2.1, "{clipped}");
+        assert_eq!(gene_vmax(&[0.0; 10], true), 1e-6);
     }
 }
