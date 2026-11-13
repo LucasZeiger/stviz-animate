@@ -258,6 +258,8 @@ Export controls:
 - Logs: `<user-data>/logs/convert_log_*.txt`, `<user-data>/logs/export_log_*.txt`.
 
 ## Packaging and distribution
+Releases are built by `.github/workflows/release.yml`. Pushing a tag such as `v1.1.0` builds all three bundles with the scripts below and attaches them to a GitHub Release. The tag must match the `version` in `Cargo.toml`. Running the workflow by hand from the Actions tab builds the bundles as downloadable artifacts without publishing. Bundles are written to `dist/`, which is not tracked in git.
+
 Scripts:
 - Windows: `scripts/package_windows.ps1`
 - macOS: `scripts/package_mac.sh`
@@ -290,6 +292,11 @@ Command line:
 First-run help (`src/app/help.rs`):
 - `ui_welcome` replaces the viewport while no dataset is loaded: open a file, generate demo data, recent datasets, a short guide, and conversion progress with Cancel.
 - `ui_top_bar` holds the app version, **Open data...** and **Shortcuts (?)**. `ui_shortcuts_window` lists `SHORTCUTS` and is toggled with `?`/`F1` in `handle_hotkeys`; Esc closes it first.
+
+Labels overlay (`src/app/overlay.rs`):
+- `OverlaySettings` (title, legend, space name, scale bar, units per coordinate, label size) is saved in workspaces.
+- `overlay_content` decides what to show for the current time: the legend follows the colour key of the segment half the view is in, and the scale bar only appears while the view rests on a space whose name contains "spatial" and the sample grid is off.
+- `layout` turns that into primitives sized relative to the output (1 unit = 1 px at 1080p). The viewport draws them with egui as a preview; exports rasterize them on the CPU (`Canvas`, using the bundled Ubuntu-Light font through `ab_glyph`) into each frame after GPU readback, for both direct ffmpeg streaming and PNG frames.
 
 Workspaces (`src/app/workspace.rs`):
 - JSON, `version: 1`; fields added later are optional so older files still open.

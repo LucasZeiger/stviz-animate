@@ -5,6 +5,7 @@ use super::{
         install_ffmpeg, remove_frames_dir, remove_temp_output, run_encode, EncodePlan, ExportJob,
         ExportJobKind, JobOutcome,
     },
+    overlay::Canvas,
     util::{apply_ease, chrono_like_timestamp, obs_name},
     ColorKey, DirectVideoExport, ExportQuality, StvizApp,
 };
@@ -548,6 +549,12 @@ impl StvizApp {
                 view_camera = cam;
             }
         }
+        // Labels are laid out now, while `self` is free to borrow, and drawn
+        // into the frame after it is read back.
+        let overlay_prims = self
+            .overlay_content(&ds, |scale| view_camera.pixels_per_unit * scale)
+            .map(|content| super::overlay::layout(&content, viewport_px))
+            .unwrap_or_default();
         let from_space = active_from as u32;
         let to_space = active_to as u32;
         let (from_center, from_scale) = if let Some(space) = ds.meta.spaces.get(active_from) {
@@ -762,6 +769,17 @@ impl StvizApp {
             }
             drop(data);
             output_buffer.unmap();
+            let is_bgra = matches!(
+                target_format,
+                wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+            );
+            Canvas {
+                pixels: &mut frame,
+                width: size[0],
+                height: size[1],
+                bgra: is_bgra,
+            }
+            .draw(&overlay_prims);
             let stdin = self
                 .direct_video_export
                 .as_mut()
@@ -796,6 +814,13 @@ impl StvizApp {
         }
         drop(data);
         output_buffer.unmap();
+        Canvas {
+            pixels: &mut rgba,
+            width: size[0],
+            height: size[1],
+            bgra: false,
+        }
+        .draw(&overlay_prims);
 
         save_rgba_png(path, size[0], size[1], &rgba)
             .map_err(|e| format!("Export PNG failed: {e:#}"))?;

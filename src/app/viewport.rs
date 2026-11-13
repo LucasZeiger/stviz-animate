@@ -266,6 +266,7 @@ impl StvizApp {
         ui.painter().add(paint_cb);
 
         self.draw_view_overlays(ui, rect);
+        self.draw_overlay_preview(ui, rect, ppp);
 
         if self.exporting_loop && self.export_total_frames > 0 {
             let path = self
