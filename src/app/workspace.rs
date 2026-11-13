@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 #[derive(Serialize, Deserialize)]
@@ -23,6 +24,16 @@ struct WorkspaceFile {
     /// when the saved path no longer exists (e.g. on another computer).
     #[serde(default)]
     dataset_file_name: Option<String>,
+    #[serde(flatten)]
+    view: WorkspaceView,
+}
+
+/// Everything a workspace restores apart from which dataset to open: the
+/// timeline, colours, filters, camera, labels and export settings. Saved
+/// scenes store this too. Fields refer to spaces and obs by name, so a view
+/// still applies after the dataset is converted again.
+#[derive(Clone, Serialize, Deserialize)]
+pub(super) struct WorkspaceView {
     dataset_points: u32,
     camera_center: [f32; 2],
     camera_pixels_per_unit: f32,
@@ -61,7 +72,7 @@ struct WorkspaceFile {
     overlay: Option<OverlaySettings>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceExport {
     fps: u32,
     duration_sec: f32,
@@ -74,7 +85,7 @@ struct WorkspaceExport {
 
 /// Layout of the advanced timeline. Each card's space, color and filter come
 /// from the keyframe with the same index.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceAdvanced {
     open: bool,
     grid_mode: bool,
@@ -83,7 +94,7 @@ struct WorkspaceAdvanced {
     connections: Vec<[usize; 2]>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceCard {
     duration_sec: f32,
     pos: [f32; 2],
@@ -92,14 +103,14 @@ struct WorkspaceCard {
     out_enabled: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceKeyframe {
     space: String,
     color: WorkspaceColor,
     filter: Option<WorkspaceFilter>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
 enum WorkspaceColor {
     Current,
@@ -108,19 +119,19 @@ enum WorkspaceColor {
     Gene(String),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceFilter {
     field: String,
     enabled_categories: Vec<String>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceOverrides {
     field: String,
     colors: HashMap<String, u32>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct WorkspaceSampleGrid {
     enabled: bool,
     obs: Option<String>,
@@ -195,14 +206,26 @@ impl StvizApp {
     }
 
     fn build_workspace(&self) -> anyhow::Result<WorkspaceFile> {
-        let ds = self
-            .dataset
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no dataset loaded"))?;
         let dataset_path = self
             .dataset_path
             .clone()
             .ok_or_else(|| anyhow::anyhow!("dataset path unavailable"))?;
+        Ok(WorkspaceFile {
+            version: 1,
+            dataset_file_name: dataset_path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string()),
+            dataset_path,
+            view: self.build_view()?,
+        })
+    }
+
+    /// Capture the current view of the loaded dataset.
+    pub(super) fn build_view(&self) -> anyhow::Result<WorkspaceView> {
+        let ds = self
+            .dataset
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no dataset loaded"))?;
 
         let mut keyframes = Vec::with_capacity(self.space_path.len());
         for (i, &space_idx) in self.space_path.iter().enumerate() {
@@ -292,12 +315,7 @@ impl StvizApp {
                 .collect(),
         });
 
-        Ok(WorkspaceFile {
-            version: 1,
-            dataset_file_name: dataset_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string()),
-            dataset_path,
+        Ok(WorkspaceView {
             dataset_points: ds.meta.n_points,
             camera_center: self.camera.center,
             camera_pixels_per_unit: self.camera.pixels_per_unit,
@@ -408,20 +426,23 @@ impl StvizApp {
             ));
         }
         let dataset_path = resolve_dataset_path(&path, &workspace)?;
-        self.apply_workspace(workspace, &dataset_path)?;
+        let ds = Dataset::load(&dataset_path).context("load dataset")?;
+        self.apply_view(ds, &dataset_path, workspace.view, true)?;
         self.workspace_status = Some(format!("Opened workspace: {}", path.display()));
         Ok(())
     }
 
-    /// Load the workspace's dataset and restore its state. Everything that
-    /// can fail is checked before the current session is touched, so a bad
-    /// workspace leaves the app as it was.
-    fn apply_workspace(
+    /// Make `ds` the current dataset and restore a saved view on it.
+    /// Everything that can fail is checked before the current session is
+    /// touched, so a bad view leaves the app as it was. `restore_ui_prefs`
+    /// also restores UI scale and theme (workspaces do; scenes don't).
+    pub(super) fn apply_view(
         &mut self,
-        workspace: WorkspaceFile,
+        ds: Arc<Dataset>,
         dataset_path: &Path,
+        workspace: WorkspaceView,
+        restore_ui_prefs: bool,
     ) -> anyhow::Result<()> {
-        let ds = Dataset::load(dataset_path).context("load dataset")?;
         if ds.meta.n_points != workspace.dataset_points {
             return Err(anyhow::anyhow!(
                 "workspace expects {} cells, dataset has {}",
@@ -536,10 +557,12 @@ impl StvizApp {
             workspace.background_rgba[2],
             workspace.background_rgba[3],
         );
-        if workspace.ui_scale.is_finite() {
-            self.ui_scale = workspace.ui_scale.clamp(0.5, 3.0);
+        if restore_ui_prefs {
+            if workspace.ui_scale.is_finite() {
+                self.ui_scale = workspace.ui_scale.clamp(0.5, 3.0);
+            }
+            self.ui_theme = workspace.ui_theme;
         }
-        self.ui_theme = workspace.ui_theme;
         self.show_axes = workspace.show_axes;
         self.show_stats = workspace.show_stats;
         self.overlay = workspace.overlay.clone().unwrap_or_default();
@@ -752,7 +775,25 @@ mod tests {
     #[test]
     fn older_workspace_files_still_parse() {
         let ws: WorkspaceFile = serde_json::from_str(&workspace_json("/data/a.stviz", "")).unwrap();
-        assert!(ws.advanced.is_none() && ws.export.is_none() && ws.dataset_file_name.is_none());
+        assert!(
+            ws.view.advanced.is_none()
+                && ws.view.export.is_none()
+                && ws.dataset_file_name.is_none()
+        );
+    }
+
+    #[test]
+    fn workspace_layout_is_unchanged_by_the_view_split() {
+        let json = workspace_json("/data/a.stviz", r#", "overlay": null"#);
+        let ws: WorkspaceFile = serde_json::from_str(&json).unwrap();
+        let out = serde_json::to_value(&ws).unwrap();
+        // View fields stay at the top level, next to the dataset path.
+        assert_eq!(out["dataset_path"], "/data/a.stviz");
+        assert_eq!(out["dataset_points"], 4);
+        assert_eq!(out["camera_center"], serde_json::json!([0.0, 0.0]));
+        assert!(out.get("view").is_none());
+        let again: WorkspaceFile = serde_json::from_value(out).unwrap();
+        assert_eq!(again.view.speed, 0.3);
     }
 
     #[test]

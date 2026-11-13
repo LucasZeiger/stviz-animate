@@ -530,7 +530,27 @@ fn run_convert(
             cmd.arg("--gene-symbols").arg(req.gene_symbols.trim());
         }
     }
+    // Converting again replaces the file; keep the scenes saved in the old one.
+    let carried_scenes = if req.mock.is_none() {
+        crate::data::read_scenes_from_path(&req.output)
+    } else {
+        None
+    };
     run_script(&mut cmd, "Conversion", log, cancel)?;
+    if let Some(scenes) = carried_scenes {
+        let carried = std::fs::metadata(&req.output)
+            .map_err(anyhow::Error::from)
+            .and_then(|m| crate::data::write_scenes(&req.output, m.len(), &scenes));
+        match carried {
+            Ok(()) => log(&format!(
+                "Kept {} saved scene(s) from the previous file.",
+                scenes.len()
+            )),
+            Err(e) => log(&format!(
+                "Warning: could not keep the saved scenes of the previous file: {e:#}"
+            )),
+        }
+    }
 
     Ok(ConvertResult {
         msg: if req.mock.is_some() {

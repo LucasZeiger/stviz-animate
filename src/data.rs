@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Context};
 use memmap2::Mmap;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fs::File,
+    io::{Read, Seek, SeekFrom, Write},
     mem::{align_of, size_of},
     path::Path,
     sync::Arc,
@@ -13,6 +14,22 @@ const STVIZ_MAGIC: [u8; 8] = *b"STVIZ\0\0\0";
 const STVIZ_VERSION: u32 = 1;
 const HEADER_BYTES_WITH_MAGIC: usize = 8 + 4 + 8;
 const LEGACY_HEADER_BYTES: usize = 8;
+
+/// Saved scenes live in an optional block after the data section:
+///
+/// ```text
+/// [header][metadata JSON][pad][data ...][scenes JSON + space padding][footer]
+/// footer = block_len: u64 LE | scenes version: u32 LE | b"STVZSCN\0"
+/// ```
+///
+/// Readers that don't know about scenes stop at the end of the data section,
+/// so files with scenes still open in older versions of the app. Adding or
+/// removing a scene rewrites only this block, never the arrays.
+const SCENES_MAGIC: [u8; 8] = *b"STVZSCN\0";
+const SCENES_VERSION: u32 = 1;
+const SCENES_FOOTER_BYTES: usize = 8 + 4 + 8;
+/// Refuse absurd scene blocks rather than allocating for them.
+const MAX_SCENES_BYTES: u64 = 64 << 20;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct SpaceMeta {
@@ -72,11 +89,40 @@ pub struct StvizMeta {
     pub expr: Option<ExprMeta>,
 }
 
+/// The scenes saved in a .stviz file. Each scene is kept as raw JSON so that
+/// scenes this version can't read (e.g. saved by a newer version) survive
+/// when other scenes are added or deleted.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SavedScenes {
+    pub scenes: Vec<serde_json::Value>,
+    /// Why existing scene data could not be read, if it couldn't.
+    pub warning: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ScenesBlock {
+    version: u32,
+    #[serde(default)]
+    scenes: Vec<serde_json::Value>,
+}
+
+/// Location of an existing scenes block, from the file's footer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScenesFooter {
+    block_start: u64,
+    block_len: u64,
+    version: u32,
+}
+
 pub struct Dataset {
     mmap: Mmap,
     data_start: usize,
+    /// End of the last data block (absolute file offset); scenes start at or after it.
+    data_end: u64,
     pub meta: StvizMeta,
     gene_index: Option<HashMap<String, u32>>,
+    /// Scenes stored in the file when it was opened.
+    pub saved_scenes: SavedScenes,
 }
 
 impl Dataset {
@@ -87,7 +133,9 @@ impl Dataset {
         }
         // Safety: the mapping is read-only. The converter never modifies a
         // .stviz in place (it writes a new file and renames it over the old
-        // one), so the mapped bytes do not change underneath us.
+        // one). Saving scenes (`write_scenes`) only writes the scenes block
+        // after the data section, which is read once here and never through
+        // the mapping afterwards, so the bytes we hand out do not change.
         let mmap = unsafe { Mmap::map(&file).context("mmap")? };
 
         let (json_start, json_len, header_version) = Self::parse_header(&mmap)?;
@@ -134,20 +182,22 @@ impl Dataset {
             gene_index = Some(m);
         }
 
-        let ds = Self {
+        let mut ds = Self {
             mmap,
             data_start,
+            data_end: 0,
             meta,
             gene_index,
+            saved_scenes: SavedScenes::default(),
         };
-        ds.validate_layout()?;
+        ds.data_end = ds.validate_layout()?;
+        ds.saved_scenes = read_scenes_block(&ds.mmap, ds.data_end);
 
         Ok(Arc::new(ds))
     }
 
     /// Read only the `source` recorded in a .stviz file's metadata.
     pub fn peek_source(path: &Path) -> Option<String> {
-        use std::io::Read;
         #[derive(Deserialize)]
         struct SourceOnly {
             #[serde(default)]
@@ -208,7 +258,8 @@ impl Dataset {
         usize::try_from(v).map_err(|_| anyhow!("{ctx} does not fit platform usize"))
     }
 
-    fn validate_range(&self, offset: u64, len: u64, ctx: &str) -> anyhow::Result<()> {
+    /// Check a data block lies inside the file; returns its end offset.
+    fn validate_range(&self, offset: u64, len: u64, ctx: &str) -> anyhow::Result<u64> {
         let off = Self::u64_to_usize(offset, &format!("{ctx} offset"))?;
         let len = Self::u64_to_usize(len, &format!("{ctx} length"))?;
         let start = Self::checked_add_usize(self.data_start, off, &format!("{ctx} start"))?;
@@ -216,10 +267,12 @@ impl Dataset {
         if end > self.mmap.len() {
             return Err(anyhow!("{ctx} block out of file bounds"));
         }
-        Ok(())
+        Ok(end as u64)
     }
 
-    fn validate_layout(&self) -> anyhow::Result<()> {
+    /// Validate every block and return where the data section ends.
+    fn validate_layout(&self) -> anyhow::Result<u64> {
+        let mut data_end = self.data_start as u64;
         let n_points = self.meta.n_points as usize;
         if self.meta.spaces.is_empty() {
             return Err(anyhow!("dataset has no spaces"));
@@ -247,7 +300,8 @@ impl Dataset {
             if s.len_bytes % (size_of::<f32>() as u64) != 0 {
                 return Err(anyhow!("space[{i}] len_bytes is not f32-aligned"));
             }
-            self.validate_range(s.offset, s.len_bytes, &format!("space[{i}]"))?;
+            data_end =
+                data_end.max(self.validate_range(s.offset, s.len_bytes, &format!("space[{i}]"))?);
         }
 
         for (i, o) in self.meta.obs.iter().enumerate() {
@@ -281,7 +335,11 @@ impl Dataset {
                             ));
                         }
                     }
-                    self.validate_range(*offset, *len_bytes, &format!("obs[{i}] categorical"))?;
+                    data_end = data_end.max(self.validate_range(
+                        *offset,
+                        *len_bytes,
+                        &format!("obs[{i}] categorical"),
+                    )?);
                 }
                 ObsMeta::Continuous {
                     len_bytes, offset, ..
@@ -296,19 +354,24 @@ impl Dataset {
                     if len_bytes % (size_of::<f32>() as u64) != 0 {
                         return Err(anyhow!("obs[{i}] continuous len_bytes is not f32-aligned"));
                     }
-                    self.validate_range(*offset, *len_bytes, &format!("obs[{i}] continuous"))?;
+                    data_end = data_end.max(self.validate_range(
+                        *offset,
+                        *len_bytes,
+                        &format!("obs[{i}] continuous"),
+                    )?);
                 }
             }
         }
 
         if let Some(expr) = self.meta.expr.as_ref() {
-            self.validate_expr(expr, n_points)?;
+            data_end = data_end.max(self.validate_expr(expr, n_points)?);
         }
 
-        Ok(())
+        Ok(data_end)
     }
 
-    fn validate_expr(&self, e: &ExprMeta, n_points: usize) -> anyhow::Result<()> {
+    /// Validate the expression matrix; returns the end of its last block.
+    fn validate_expr(&self, e: &ExprMeta, n_points: usize) -> anyhow::Result<u64> {
         if e.kind != "csc" {
             return Err(anyhow!("unsupported expr kind '{}'", e.kind));
         }
@@ -351,9 +414,10 @@ impl Dataset {
             ));
         }
 
-        self.validate_range(e.indptr_offset, e.indptr_len_bytes, "expr.indptr")?;
-        self.validate_range(e.indices_offset, e.indices_len_bytes, "expr.indices")?;
-        self.validate_range(e.data_offset, e.data_len_bytes, "expr.data")?;
+        let end = self
+            .validate_range(e.indptr_offset, e.indptr_len_bytes, "expr.indptr")?
+            .max(self.validate_range(e.indices_offset, e.indices_len_bytes, "expr.indices")?)
+            .max(self.validate_range(e.data_offset, e.data_len_bytes, "expr.data")?);
 
         let indptr_b = self.slice_bytes(e.indptr_offset, e.indptr_len_bytes)?;
         let mut prev = 0usize;
@@ -388,7 +452,7 @@ impl Dataset {
             }
         }
 
-        Ok(())
+        Ok(end)
     }
 
     fn slice_bytes(&self, offset: u64, len: u64) -> anyhow::Result<&[u8]> {
@@ -472,6 +536,11 @@ impl Dataset {
         }
     }
 
+    /// Replace the scenes stored in this dataset's file. See `write_scenes`.
+    pub fn write_scenes(&self, path: &Path, scenes: &[serde_json::Value]) -> anyhow::Result<()> {
+        write_scenes(path, self.data_end, scenes)
+    }
+
     pub fn find_gene(&self, gene: &str) -> Option<u32> {
         self.gene_index.as_ref()?.get(gene).copied()
     }
@@ -519,6 +588,144 @@ impl Dataset {
         }
         Ok(out)
     }
+}
+
+fn parse_scenes_footer(tail: &[u8], file_len: u64) -> Option<ScenesFooter> {
+    if tail.len() != SCENES_FOOTER_BYTES || !tail.ends_with(&SCENES_MAGIC) {
+        return None;
+    }
+    let block_len = u64::from_le_bytes(tail[0..8].try_into().unwrap());
+    let version = u32::from_le_bytes(tail[8..12].try_into().unwrap());
+    let block_start = file_len
+        .checked_sub(SCENES_FOOTER_BYTES as u64)?
+        .checked_sub(block_len)?;
+    Some(ScenesFooter {
+        block_start,
+        block_len,
+        version,
+    })
+}
+
+/// Find the scenes footer at the end of `bytes` (a whole file), if any. A
+/// footer whose block would overlap the data section is not ours and is ignored.
+fn find_scenes_footer(bytes: &[u8], data_end: u64) -> Option<ScenesFooter> {
+    let tail = bytes.get(bytes.len().checked_sub(SCENES_FOOTER_BYTES)?..)?;
+    parse_scenes_footer(tail, bytes.len() as u64).filter(|f| f.block_start >= data_end)
+}
+
+fn read_scenes_block(bytes: &[u8], data_end: u64) -> SavedScenes {
+    let Some(footer) = find_scenes_footer(bytes, data_end) else {
+        return SavedScenes::default();
+    };
+    let warn = |msg: &str| SavedScenes {
+        scenes: Vec::new(),
+        warning: Some(msg.to_string()),
+    };
+    if footer.version != SCENES_VERSION {
+        return warn(
+            "This file's saved scenes were made by a newer version of stviz-animate. \
+             Update the app to see them.",
+        );
+    }
+    if footer.block_len > MAX_SCENES_BYTES {
+        return warn("This file's saved scenes are too large to read.");
+    }
+    let start = footer.block_start as usize;
+    let end = start + footer.block_len as usize;
+    match serde_json::from_slice::<ScenesBlock>(&bytes[start..end]) {
+        Ok(block) => SavedScenes {
+            scenes: block.scenes,
+            warning: None,
+        },
+        Err(_) => warn(
+            "This file's saved scenes are damaged and could not be read. \
+             Saving a scene will replace them.",
+        ),
+    }
+}
+
+/// Read the scenes from a .stviz file without opening its data, e.g. to carry
+/// them over when the file is converted again. `None` if there are none.
+pub fn read_scenes_from_path(path: &Path) -> Option<Vec<serde_json::Value>> {
+    let mut file = File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut tail = [0u8; SCENES_FOOTER_BYTES];
+    file.seek(SeekFrom::Start(len.checked_sub(tail.len() as u64)?))
+        .ok()?;
+    file.read_exact(&mut tail).ok()?;
+    let footer = parse_scenes_footer(&tail, len)?;
+    if footer.version != SCENES_VERSION || footer.block_len > MAX_SCENES_BYTES {
+        return None;
+    }
+    let mut block = vec![0u8; footer.block_len as usize];
+    file.seek(SeekFrom::Start(footer.block_start)).ok()?;
+    file.read_exact(&mut block).ok()?;
+    let block: ScenesBlock = serde_json::from_slice(&block).ok()?;
+    (!block.scenes.is_empty()).then_some(block.scenes)
+}
+
+/// Replace the scenes block of the .stviz at `path`. `data_end` is where the
+/// file's data section ends; nothing before it is touched.
+///
+/// An existing block is overwritten in place; otherwise the block is appended.
+/// The file never shrinks: a shorter block is padded with spaces (valid JSON
+/// whitespace), because Windows refuses to truncate a file while it is
+/// memory-mapped, and the app keeps the open dataset mapped.
+pub fn write_scenes(
+    path: &Path,
+    data_end: u64,
+    scenes: &[serde_json::Value],
+) -> anyhow::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open for writing: {}", path.display()))?;
+    let len = file.metadata()?.len();
+    if len < data_end {
+        return Err(anyhow!(
+            "the file changed on disk since it was opened; open it again"
+        ));
+    }
+    let mut footer = None;
+    if len >= data_end + SCENES_FOOTER_BYTES as u64 {
+        let mut tail = [0u8; SCENES_FOOTER_BYTES];
+        file.seek(SeekFrom::Start(len - tail.len() as u64))?;
+        file.read_exact(&mut tail)?;
+        footer = parse_scenes_footer(&tail, len).filter(|f| f.block_start >= data_end);
+    }
+    let (start, min_len) = match footer {
+        Some(f) if f.version != SCENES_VERSION => {
+            return Err(anyhow!(
+                "this file's scenes were saved by a newer version of stviz-animate; \
+                 update the app to change them"
+            ))
+        }
+        Some(f) => (f.block_start, f.block_len),
+        None => (len, 0),
+    };
+
+    let mut block = serde_json::to_vec(&ScenesBlock {
+        version: SCENES_VERSION,
+        scenes: scenes.to_vec(),
+    })?;
+    if block.len() as u64 > MAX_SCENES_BYTES {
+        return Err(anyhow!("too much scene data to save"));
+    }
+    if (block.len() as u64) < min_len {
+        block.resize(min_len as usize, b' ');
+    }
+    let mut out = block;
+    let block_len = out.len() as u64;
+    out.extend_from_slice(&block_len.to_le_bytes());
+    out.extend_from_slice(&SCENES_VERSION.to_le_bytes());
+    out.extend_from_slice(&SCENES_MAGIC);
+
+    file.seek(SeekFrom::Start(start))?;
+    file.write_all(&out)
+        .with_context(|| format!("write scenes: {}", path.display()))?;
+    file.sync_all()?;
+    Ok(())
 }
 
 /// Builds small .stviz files for tests.
@@ -597,7 +804,9 @@ pub mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::{test_support::*, Dataset};
+    use super::{
+        read_scenes_from_path, test_support::*, Dataset, SavedScenes, SCENES_MAGIC, SCENES_VERSION,
+    };
     use std::path::PathBuf;
 
     fn temp_file(name: &str) -> PathBuf {
@@ -680,5 +889,122 @@ mod tests {
         let mut bad_data = data.clone();
         bad_data[off..off + 4].copy_from_slice(&99u32.to_le_bytes());
         assert!(load_err("indices.stviz", &encode_stviz(&meta, &bad_data)).contains("out of range"));
+    }
+
+    fn scene(name: &str, payload: usize) -> serde_json::Value {
+        serde_json::json!({"name": name, "view": {"blob": "x".repeat(payload)}})
+    }
+
+    fn names(ds: &Dataset) -> Vec<String> {
+        ds.saved_scenes
+            .scenes
+            .iter()
+            .map(|s| s["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn scenes_round_trip_without_touching_the_data() {
+        let path = temp_file("scenes.stviz");
+        write_stviz(&path, 6, None);
+        let original = std::fs::read(&path).unwrap();
+        let ds = Dataset::load(&path).unwrap();
+        assert!(ds.saved_scenes.scenes.is_empty() && ds.saved_scenes.warning.is_none());
+        assert_eq!(ds.data_end, original.len() as u64);
+
+        // Written while the dataset is open (and mapped), as the app does.
+        ds.write_scenes(&path, &[scene("a", 10), scene("b", 500)])
+            .unwrap();
+        let grown = std::fs::read(&path).unwrap();
+        assert_eq!(
+            &grown[..original.len()],
+            &original[..],
+            "data must not change"
+        );
+        assert_eq!(ds.space_f32_2d(0).unwrap()[3], 3.0);
+
+        let ds2 = Dataset::load(&path).unwrap();
+        assert_eq!(names(&ds2), ["a", "b"]);
+        assert_eq!(ds2.saved_scenes.scenes[1], scene("b", 500));
+        assert_eq!(ds2.space_f32_2d(1).unwrap(), ds.space_f32_2d(1).unwrap());
+        assert_eq!(read_scenes_from_path(&path).unwrap().len(), 2);
+
+        // Fewer scenes: rewritten in place, padded, never shrinking the file.
+        ds2.write_scenes(&path, &[scene("c", 1)]).unwrap();
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(after.len(), grown.len());
+        assert_eq!(&after[..original.len()], &original[..]);
+        let ds3 = Dataset::load(&path).unwrap();
+        assert_eq!(names(&ds3), ["c"]);
+
+        // More scenes than fit: the block grows in place.
+        ds3.write_scenes(&path, &[scene("c", 1), scene("d", 4000)])
+            .unwrap();
+        let ds4 = Dataset::load(&path).unwrap();
+        assert_eq!(names(&ds4), ["c", "d"]);
+        assert!(std::fs::metadata(&path).unwrap().len() > grown.len() as u64);
+
+        // Deleting every scene leaves a valid, empty block.
+        ds4.write_scenes(&path, &[]).unwrap();
+        let ds5 = Dataset::load(&path).unwrap();
+        assert!(ds5.saved_scenes.scenes.is_empty() && ds5.saved_scenes.warning.is_none());
+        assert_eq!(read_scenes_from_path(&path), None);
+    }
+
+    #[test]
+    fn unreadable_scene_blocks_never_stop_the_file_from_opening() {
+        let (meta, data) = stviz_parts(6, None);
+        let good = encode_stviz(&meta, &data);
+        let footer = |len: u64, version: u32| {
+            let mut f = len.to_le_bytes().to_vec();
+            f.extend_from_slice(&version.to_le_bytes());
+            f.extend_from_slice(&SCENES_MAGIC);
+            f
+        };
+
+        // Damaged JSON: opens with a warning, and saving replaces the block.
+        let mut bytes = good.clone();
+        bytes.extend_from_slice(b"{not json");
+        bytes.extend(footer(9, SCENES_VERSION));
+        let path = temp_file("damaged-scenes.stviz");
+        std::fs::write(&path, &bytes).unwrap();
+        let ds = Dataset::load(&path).unwrap();
+        assert!(ds
+            .saved_scenes
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("damaged"));
+        ds.write_scenes(&path, &[scene("ok", 1)]).unwrap();
+        assert_eq!(names(&Dataset::load(&path).unwrap()), ["ok"]);
+
+        // A newer scenes version: opens with a warning and is not overwritten.
+        let mut bytes = good.clone();
+        bytes.extend_from_slice(b"{}");
+        bytes.extend(footer(2, SCENES_VERSION + 1));
+        let path = temp_file("newer-scenes.stviz");
+        std::fs::write(&path, &bytes).unwrap();
+        let ds = Dataset::load(&path).unwrap();
+        assert!(ds
+            .saved_scenes
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("newer"));
+        assert!(ds.write_scenes(&path, &[scene("x", 1)]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+
+        // A footer whose block would reach into the data section is ignored,
+        // and saving appends a fresh block after it.
+        let mut bytes = good.clone();
+        bytes.extend(footer(64, SCENES_VERSION));
+        let path = temp_file("overlap-scenes.stviz");
+        std::fs::write(&path, &bytes).unwrap();
+        let ds = Dataset::load(&path).unwrap();
+        assert_eq!(ds.saved_scenes, SavedScenes::default());
+        ds.write_scenes(&path, &[scene("y", 1)]).unwrap();
+        let written = std::fs::read(&path).unwrap();
+        assert_eq!(&written[..bytes.len()], &bytes[..]);
+        assert_eq!(names(&Dataset::load(&path).unwrap()), ["y"]);
     }
 }
