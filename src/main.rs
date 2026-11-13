@@ -17,6 +17,27 @@ fn load_app_icon() -> Option<eframe::egui::IconData> {
     })
 }
 
+type DeviceDescriptorFn = std::sync::Arc<
+    dyn Fn(&egui_wgpu::wgpu::Adapter) -> egui_wgpu::wgpu::DeviceDescriptor<'static> + Send + Sync,
+>;
+
+/// Point positions and colours live in one storage buffer each. wgpu's default
+/// limits cap a storage binding at 128 MiB, which is exactly 2^24 (16.7M) cells
+/// of xy positions, so ask for whatever the GPU actually supports instead
+/// (typically 2-4 GiB, i.e. hundreds of millions of cells).
+fn with_large_buffer_limits(base: DeviceDescriptorFn) -> DeviceDescriptorFn {
+    std::sync::Arc::new(move |adapter| {
+        let mut desc = base(adapter);
+        let supported = adapter.limits();
+        let limits = &mut desc.required_limits;
+        limits.max_storage_buffer_binding_size = limits
+            .max_storage_buffer_binding_size
+            .max(supported.max_storage_buffer_binding_size);
+        limits.max_buffer_size = limits.max_buffer_size.max(supported.max_buffer_size);
+        desc
+    })
+}
+
 fn main() -> eframe::Result<()> {
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("stviz-animate")
@@ -28,20 +49,19 @@ fn main() -> eframe::Result<()> {
         viewport,
         ..Default::default()
     };
+    let mut wgpu_config = egui_wgpu::WgpuConfiguration::default();
     if cfg!(target_os = "windows") {
-        let mut wgpu_config = egui_wgpu::WgpuConfiguration {
-            desired_maximum_frame_latency: Some(1),
-            ..Default::default()
-        };
-        if std::env::var("WGPU_BACKEND").is_err() {
-            if let egui_wgpu::WgpuSetup::CreateNew(mut setup) = wgpu_config.wgpu_setup {
-                setup.instance_descriptor.backends =
-                    egui_wgpu::wgpu::Backends::DX12 | egui_wgpu::wgpu::Backends::GL;
-                wgpu_config.wgpu_setup = egui_wgpu::WgpuSetup::CreateNew(setup);
-            }
-        }
-        native_options.wgpu_options = wgpu_config;
+        wgpu_config.desired_maximum_frame_latency = Some(1);
     }
+    if let egui_wgpu::WgpuSetup::CreateNew(mut setup) = wgpu_config.wgpu_setup {
+        if cfg!(target_os = "windows") && std::env::var("WGPU_BACKEND").is_err() {
+            setup.instance_descriptor.backends =
+                egui_wgpu::wgpu::Backends::DX12 | egui_wgpu::wgpu::Backends::GL;
+        }
+        setup.device_descriptor = with_large_buffer_limits(setup.device_descriptor);
+        wgpu_config.wgpu_setup = egui_wgpu::WgpuSetup::CreateNew(setup);
+    }
+    native_options.wgpu_options = wgpu_config;
 
     eframe::run_native(
         "stviz-animate",

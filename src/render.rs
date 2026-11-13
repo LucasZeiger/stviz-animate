@@ -388,21 +388,29 @@ impl PointCloudGpu {
             *self = Self::new(device, format);
         }
 
+        // Draw nothing until everything below has succeeded, so a failed
+        // prepare never paints with buffers that don't match the dataset.
+        self.n_draw = 0;
+
         let n_points = dataset.meta.n_points;
-        if let Some(bad) = draw_indices.iter().copied().find(|&idx| idx >= n_points) {
-            return Err(anyhow!(
-                "draw index out of range: {} (n_points={})",
-                bad,
-                n_points
-            ));
+        let indices_changed =
+            self.last_dataset_id != dataset_id || self.last_indices_id != indices_id;
+        if indices_changed {
+            if let Some(bad) = draw_indices.iter().copied().find(|&idx| idx >= n_points) {
+                return Err(anyhow!(
+                    "draw index out of range: {} (n_points={})",
+                    bad,
+                    n_points
+                ));
+            }
         }
-        self.n_points = n_points;
-        self.n_draw = draw_indices.len() as u32;
 
         // Grow buffers
         let pos_bytes_need = (n_points as u64) * 2 * 4;
         let col_bytes_need = (n_points as u64) * 4;
-        let idx_bytes_need = (self.n_draw as u64) * 4;
+        let idx_bytes_need = (draw_indices.len() as u64) * 4;
+        check_gpu_capacity(&device.limits(), n_points as u64, pos_bytes_need)?;
+        self.n_points = n_points;
 
         Self::ensure_storage_buffer(device, &mut self.pos_from, "pc_pos_from", pos_bytes_need);
         Self::ensure_storage_buffer(device, &mut self.pos_to, "pc_pos_to", pos_bytes_need);
@@ -512,7 +520,7 @@ impl PointCloudGpu {
         }
 
         // Upload indices when changed
-        if self.last_dataset_id != dataset_id || self.last_indices_id != indices_id {
+        if indices_changed {
             let bytes = bytemuck::cast_slice(draw_indices);
             Self::write_chunked(queue, &self.draw_indices, bytes);
             self.last_indices_id = indices_id;
@@ -522,6 +530,7 @@ impl PointCloudGpu {
         queue.write_buffer(&self.uniform_buf, 0, bytemuck::bytes_of(&uniforms));
 
         self.last_dataset_id = dataset_id;
+        self.n_draw = draw_indices.len() as u32;
         Ok(())
     }
 
@@ -538,6 +547,42 @@ impl PointCloudGpu {
         render_pass.set_vertex_buffer(0, self.corners.slice(..));
         render_pass.draw(0..6, 0..self.n_draw);
     }
+}
+
+/// The largest per-point GPU buffer holds xy positions (8 bytes per cell). If
+/// the device can't bind or allocate one that big, wgpu would raise a
+/// validation error and abort the app, so refuse up front with a message that
+/// says how far over the limit the dataset is.
+pub fn check_gpu_capacity(
+    limits: &wgpu::Limits,
+    n_points: u64,
+    pos_bytes_need: u64,
+) -> anyhow::Result<()> {
+    let max_bytes = (limits.max_storage_buffer_binding_size as u64).min(limits.max_buffer_size);
+    if pos_bytes_need <= max_bytes {
+        return Ok(());
+    }
+    let max_cells = max_bytes / 8;
+    Err(anyhow!(
+        "This dataset has {} cells, but this GPU can only draw up to {} cells \
+         (largest buffer it allows is {} MiB). Subset the dataset before converting it, \
+         or try a GPU with more memory.",
+        group_thousands(n_points),
+        group_thousands(max_cells),
+        max_bytes / (1024 * 1024)
+    ))
+}
+
+fn group_thousands(n: u64) -> String {
+    let s = n.to_string();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, ch) in s.chars().enumerate() {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 pub struct RenderParams {
@@ -593,6 +638,154 @@ impl SharedRender {
                 to_override_id: 0,
             }),
             last_prepare_error: Mutex::new(None),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_limits_stop_at_2_pow_24_cells() {
+        let limits = wgpu::Limits::default();
+        let ok = 1u64 << 24;
+        assert!(check_gpu_capacity(&limits, ok, ok * 8).is_ok());
+        let over = ok + 1;
+        let err = check_gpu_capacity(&limits, over, over * 8)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("16,777,217 cells"), "{err}");
+        assert!(err.contains("up to 16,777,216 cells"), "{err}");
+    }
+
+    #[test]
+    fn raised_limits_allow_large_datasets() {
+        let limits = wgpu::Limits {
+            max_storage_buffer_binding_size: i32::MAX as u32,
+            max_buffer_size: 1 << 40,
+            ..wgpu::Limits::default()
+        };
+        let n = 50_000_000u64;
+        assert!(check_gpu_capacity(&limits, n, n * 8).is_ok());
+    }
+
+    #[test]
+    fn thousands_grouping() {
+        assert_eq!(group_thousands(0), "0");
+        assert_eq!(group_thousands(999), "999");
+        assert_eq!(group_thousands(1_000), "1,000");
+        assert_eq!(group_thousands(16_777_216), "16,777,216");
+    }
+
+    /// Renders a dataset just over 2^24 cells on a real GPU device, once with
+    /// wgpu's default limits (must fail with a message, not abort) and once
+    /// with the adapter's limits as `main.rs` requests them (must draw).
+    /// Needs a GPU or a software Vulkan driver (e.g. Mesa lavapipe) and ~3 GB RAM:
+    /// `cargo test --release large_dataset_on_gpu -- --ignored`
+    #[test]
+    #[ignore]
+    fn large_dataset_on_gpu() {
+        let n: u32 = (1 << 24) + 1_000;
+        let path = std::env::temp_dir().join(format!("stviz_large_{}.stviz", std::process::id()));
+        crate::data::test_support::write_stviz(&path, n, None);
+        let ds = Dataset::load(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        let instance = wgpu::Instance::default();
+        let adapter =
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default()))
+                .expect("no GPU adapter");
+        let supported = adapter.limits();
+
+        let run = |limits: wgpu::Limits| -> anyhow::Result<()> {
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+                    required_limits: limits,
+                    ..Default::default()
+                }))
+                .unwrap();
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: None,
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = target.create_view(&Default::default());
+            device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let mut gpu = PointCloudGpu::new(&device, format);
+            let colors = vec![0xFFFF_FFFFu32; n as usize];
+            let indices: Vec<u32> = (0..n).collect();
+            let mut uniforms = Uniforms::zeroed();
+            uniforms.viewport_px = [64.0, 64.0];
+            uniforms.pixels_per_unit = 1.0;
+            uniforms.point_radius_px = 1.0;
+            uniforms.from_scale = 1.0;
+            uniforms.to_scale = 1.0;
+            let res = gpu.prepare(
+                &device, &queue, format, &ds, 1, 0, 1, 1, &colors, 1, &colors, 1, &indices, None,
+                None, 0, 0, uniforms,
+            );
+            let mut enc = device.create_command_encoder(&Default::default());
+            {
+                let mut pass = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                gpu.paint(&mut pass, false);
+            }
+            queue.submit([enc.finish()]);
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            if let Some(e) = pollster::block_on(device.pop_error_scope()) {
+                panic!("wgpu validation error: {e}");
+            }
+            res
+        };
+
+        let default_err = run(wgpu::Limits::default()).unwrap_err().to_string();
+        assert!(
+            default_err.contains("can only draw up to 16,777,216 cells"),
+            "{default_err}"
+        );
+
+        let raised = wgpu::Limits {
+            max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
+            max_buffer_size: supported.max_buffer_size,
+            ..wgpu::Limits::default()
+        };
+        let fits = (n as u64) * 8
+            <= (supported.max_storage_buffer_binding_size as u64).min(supported.max_buffer_size);
+        eprintln!(
+            "adapter: {:?}, max storage binding {} MiB, dataset fits: {fits}",
+            adapter.get_info().name,
+            supported.max_storage_buffer_binding_size >> 20
+        );
+        let res = run(raised);
+        if fits {
+            res.unwrap();
+        } else {
+            // Software drivers such as lavapipe really are capped at 128 MiB.
+            assert!(res.is_err());
         }
     }
 }

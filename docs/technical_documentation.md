@@ -162,6 +162,8 @@ Key components:
 - `Uniforms` contain camera transforms, interpolations, and point size.
 - `assets/pointcloud.wgsl` renders instanced quads with a circular mask.
 
+Dataset size: every cell's xy position for a space sits in one GPU storage buffer (8 bytes per cell). wgpu's default limit of 128 MiB per buffer would stop at 2^24 (16,777,216) cells, so `main.rs` requests the GPU's own maximum at startup (usually 2-4 GiB, i.e. hundreds of millions of cells). If a dataset still doesn't fit, `PointCloudGpu::prepare` refuses with a message naming the GPU's cell limit instead of letting wgpu abort the app.
+
 Uniforms (core fields):
 - `viewport_px`: viewport size in pixels.
 - `center`, `pixels_per_unit`: camera transform.
@@ -374,6 +376,7 @@ Windows notes:
 - Workspace cannot find its dataset: put the `.stviz` next to the workspace file.
 - Export artifacts: verify PNG frames to isolate encoding artifacts.
 - WSL GPU: performance may be limited vs native Windows/Linux.
+- "this GPU can only draw up to N cells": the dataset is bigger than the largest buffer the GPU allows. Subset it (for example per sample) before converting, or use a machine with a dedicated GPU. Software renderers such as llvmpipe stop at 16.7M cells.
 - Start over: close the app and delete the user-data folder. Converted files, logs, settings and the managed Python environment are all inside it.
 
 ## Extension points
