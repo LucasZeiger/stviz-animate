@@ -1,13 +1,19 @@
 name: Release
 
 # Builds Windows, macOS and Linux bundles and attaches them to a GitHub
-# Release. Runs when a version tag such as v1.1.0 is pushed. It can also be
-# started by hand from the Actions tab to try the build without publishing.
+# Release. Runs when a version tag such as v1.1.0 is pushed. Pull requests
+# that touch packaging, and manual runs from the Actions tab, build the
+# bundles as artifacts without publishing anything.
 
 on:
   push:
     tags:
       - "v*"
+  pull_request:
+    paths:
+      - ".github/workflows/release.yml"
+      - "scripts/package_*"
+      - "Cargo.toml"
   workflow_dispatch:
 
 permissions:
