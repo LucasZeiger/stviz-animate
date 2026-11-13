@@ -329,7 +329,7 @@ Command line:
 
 First-run help (`src/app/help.rs`):
 - `ui_welcome` replaces the viewport while no dataset is loaded: open a file, generate demo data, recent datasets, a short guide, and conversion progress with Cancel.
-- `ui_top_bar` holds the app version, **Open data...** and **Shortcuts (?)**. `ui_shortcuts_window` lists `SHORTCUTS` and is toggled with `?`/`F1` in `handle_hotkeys`; Esc closes it first.
+- `ui_top_bar` holds the app version, **Undo**/**Redo**, **Open data...** and **Shortcuts (?)**. `ui_shortcuts_window` lists `SHORTCUTS` and is toggled with `?`/`F1` in `handle_hotkeys`; Esc closes it first.
 
 Labels overlay (`src/app/overlay.rs`):
 - `OverlaySettings` (title, legend, space name, scale bar, units per coordinate, label size) is saved in workspaces.
@@ -345,6 +345,12 @@ Workspaces (`src/app/workspace.rs`):
 Saved scenes (`src/app/scenes.rs`):
 - A scene is a named `WorkspaceView` (everything a workspace restores except the dataset path, UI scale and theme) stored in the `.stviz` itself; see the data format section.
 - Scenes are kept as raw JSON so entries this version can't read survive when others are saved or deleted. Saving with an existing name replaces that scene.
+
+Undo and redo (`src/app/history.rs`):
+- **Undo**/**Redo** in the top bar, Ctrl/Cmd+Z, and Ctrl/Cmd+Shift+Z or Ctrl+Y. Text fields keep their own undo while focused.
+- No control records steps itself. After a frame with input, once no pointer button is held and no text field has focus, `update_history` captures a snapshot (the `WorkspaceView` scenes use, the lasso selection and the scene list) and records a step if it differs from the last one. A slider drag or a typed title is therefore one step, and new view settings are covered as soon as `WorkspaceView` stores them.
+- Camera, playback position, UI scale and theme are not compared and are kept when undoing, except for a step that loaded a scene, which restores the camera too. Undoing a scene save or delete rewrites the scene list in the file.
+- Restoring goes through `apply_view`, like loading a scene. The history (100 steps) is cleared when another dataset is opened.
 
 Subprocesses (`src/app/process.rs`):
 - `run_cancellable` (captured output) and `run_streaming` (line by line) poll the child and stop it when the job's cancel flag is set.

@@ -197,9 +197,27 @@ impl SelectionState {
     }
 }
 
+impl SelectionState {
+    pub(super) fn version(&self) -> u64 {
+        self.selected_version
+    }
+
+    pub(super) fn selected(&self) -> &[u32] {
+        &self.selected
+    }
+}
+
 impl StvizApp {
+    /// Replace the lasso selection, as undo and redo do.
+    pub(super) fn restore_selection(&mut self, cells: &[u32]) {
+        self.sync_selection_dataset();
+        self.selection.selected = cells.to_vec();
+        self.selection.selected_version = self.selection.selected_version.wrapping_add(1);
+        self.selection.status = None;
+    }
+
     /// Forget selection, highlight and hover when another dataset is loaded.
-    fn sync_selection_dataset(&mut self) {
+    pub(super) fn sync_selection_dataset(&mut self) {
         if self.selection.dataset_id != self.dataset_id {
             let keep = (
                 self.selection.hover_enabled,

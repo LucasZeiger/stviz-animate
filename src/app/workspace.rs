@@ -32,7 +32,7 @@ struct WorkspaceFile {
 /// timeline, colours, filters, camera, labels and export settings. Saved
 /// scenes store this too. Fields refer to spaces and obs by name, so a view
 /// still applies after the dataset is converted again.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub(super) struct WorkspaceView {
     dataset_points: u32,
     camera_center: [f32; 2],
@@ -76,7 +76,7 @@ pub(super) struct WorkspaceView {
     overlay: Option<OverlaySettings>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct WorkspaceExport {
     fps: u32,
     duration_sec: f32,
@@ -89,7 +89,7 @@ struct WorkspaceExport {
 
 /// Layout of the advanced timeline. Each card's space, color and filter come
 /// from the keyframe with the same index.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct WorkspaceAdvanced {
     open: bool,
     grid_mode: bool,
@@ -98,7 +98,7 @@ struct WorkspaceAdvanced {
     connections: Vec<[usize; 2]>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct WorkspaceCard {
     duration_sec: f32,
     pos: [f32; 2],
@@ -107,14 +107,14 @@ struct WorkspaceCard {
     out_enabled: bool,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct WorkspaceKeyframe {
     space: String,
     color: WorkspaceColor,
     filter: Option<WorkspaceFilter>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "value")]
 enum WorkspaceColor {
     Current,
@@ -123,19 +123,19 @@ enum WorkspaceColor {
     Gene(String),
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct WorkspaceFilter {
     field: String,
     enabled_categories: Vec<String>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct WorkspaceOverrides {
     field: String,
     colors: HashMap<String, u32>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 struct WorkspaceSampleGrid {
     enabled: bool,
     obs: Option<String>,
@@ -145,6 +145,22 @@ struct WorkspaceSampleGrid {
     labels_enabled: bool,
     label_mode: SampleGridLabelMode,
     custom_labels: Vec<String>,
+}
+
+impl WorkspaceView {
+    /// Whether two views differ only in where the camera is, the playback
+    /// position or the UI scale and theme: things undo should not track.
+    pub(super) fn same_edits(&self, other: &Self) -> bool {
+        let norm = |v: &Self| Self {
+            camera_center: [0.0; 2],
+            camera_pixels_per_unit: 0.0,
+            t: 0.0,
+            ui_scale: 0.0,
+            ui_theme: UiTheme::Dark,
+            ..v.clone()
+        };
+        norm(self) == norm(other)
+    }
 }
 
 impl StvizApp {

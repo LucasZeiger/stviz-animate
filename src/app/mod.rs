@@ -21,6 +21,7 @@ mod export;
 mod export_job;
 mod fit_text;
 mod help;
+mod history;
 mod input;
 mod keyframes;
 mod layout;
@@ -262,6 +263,8 @@ pub struct StvizApp {
     selection: selection::SelectionState,
     /// Named scenes stored in the open .stviz file.
     scenes: scenes::SceneState,
+    /// Undo and redo of view edits.
+    history: history::History,
 
     // Legend / gene input
     legend_range: Option<LegendRange>,
@@ -649,6 +652,7 @@ impl StvizApp {
             overlay: overlay::OverlaySettings::default(),
             selection: selection::SelectionState::new(),
             scenes: scenes::SceneState::default(),
+            history: history::History::default(),
             legend_range: None,
             active_legend_range: None,
             gene_query: String::new(),
@@ -749,6 +753,7 @@ impl eframe::App for StvizApp {
             self.viewport_fullscreen_overlay(ctx);
             self.ui_advanced_timeline(ctx);
             self.ui_shortcuts_window(ctx);
+            self.update_history(ctx);
             return;
         }
 
@@ -783,6 +788,7 @@ impl eframe::App for StvizApp {
         });
         self.ui_advanced_timeline(ctx);
         self.ui_shortcuts_window(ctx);
+        self.update_history(ctx);
 
         if self.convert_running() || self.dataset_load.is_some() {
             ctx.request_repaint_after(self.main_view_frame_interval());
