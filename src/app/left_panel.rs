@@ -40,6 +40,7 @@ impl StvizApp {
         self.ui_sample_grid_section(ui, &ds);
         self.ui_color_section(ui, &ds);
         self.ui_filters_and_legend(ui, &ds);
+        self.ui_selection_section(ui, &ds);
         self.ui_rendering_section(ui, &ds);
         self.ui_labels_section(ui, &ds);
         self.ui_output_section(ui);
@@ -725,6 +726,8 @@ impl StvizApp {
                             ui.label("No dataset palette found; using Tableau10.");
                         }
                         let mut filter_changed = false;
+                        // Hovering a category highlights its cells in the view.
+                        let mut hovered_category = None;
                         if too_many {
                             ui.colored_label(
                                 egui::Color32::YELLOW,
@@ -756,6 +759,7 @@ impl StvizApp {
                                         overrides,
                                         &mut filter_changed,
                                         &mut colors_changed,
+                                        &mut hovered_category,
                                     );
                                 });
                             } else {
@@ -773,6 +777,7 @@ impl StvizApp {
                                             overrides,
                                             &mut filter_changed,
                                             &mut colors_changed,
+                                            &mut hovered_category,
                                         );
                                     });
                                 ui.horizontal(|ui| {
@@ -821,12 +826,17 @@ impl StvizApp {
                                                         overrides,
                                                         &mut filter_changed,
                                                         &mut colors_changed,
+                                                        &mut hovered_category,
                                                     );
                                                 },
                                             );
                                     });
                                 self.filter_popup_open = open;
                             }
+                        }
+
+                        if let Some(category) = hovered_category {
+                            self.selection.panel_hover = Some((self.active_obs_idx, category));
                         }
 
                         ui.horizontal(|ui| {
@@ -1415,6 +1425,7 @@ impl StvizApp {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_filter_rows(
     ui: &mut egui::Ui,
     range: std::ops::Range<usize>,
@@ -1424,6 +1435,7 @@ fn render_filter_rows(
     overrides: &mut [Option<u32>],
     filter_changed: &mut bool,
     colors_changed: &mut bool,
+    hovered: &mut Option<usize>,
 ) {
     for i in range {
         let c = &categories[i];
@@ -1434,7 +1446,7 @@ fn render_filter_rows(
             color = override_color;
         }
         let mut color = color32_from_packed(color);
-        ui.horizontal(|ui| {
+        let row = ui.horizontal(|ui| {
             if ui.checkbox(&mut enabled_categories[i], "").changed() {
                 *filter_changed = true;
             }
@@ -1446,6 +1458,9 @@ fn render_filter_rows(
             }
             truncated_label(ui, c);
         });
+        if row.response.contains_pointer() {
+            *hovered = Some(i);
+        }
     }
 }
 

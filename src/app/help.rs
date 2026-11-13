@@ -20,6 +20,15 @@ pub(super) const SHORTCUTS: &[(&str, &str)] = &[
     ("? or F1", "Show or hide this list"),
     ("Drag in the view", "Pan"),
     ("Scroll in the view", "Zoom at the pointer"),
+    (
+        "Shift + drag in the view",
+        "Lasso-select cells (Ctrl/Cmd adds, Alt removes)",
+    ),
+    ("Hover a cell", "Show its name and annotations"),
+    (
+        "Click a legend entry",
+        "Highlight that group (click again to clear)",
+    ),
     ("Drop a file", "Open a .h5ad (converts it) or a .stviz"),
 ];
 
