@@ -99,6 +99,7 @@ Requires Python 3.9+ (Python 3.10+ recommended).
 - Appearance, the last used folder and recent datasets are remembered between launches in `<user-data>/settings.json`.
 
 ## Export
+- **Labels**: under *Show labels on view and exports* you can add a title, a legend for the current colouring, the space name and a scale bar. They are previewed in the viewport and drawn into screenshots and videos at any resolution. The scale bar appears on spaces with "spatial" in their name while the view rests on that space; set how many µm (or another unit) one coordinate is. Label settings are saved in workspaces.
 - Screenshot: saves a PNG to `<user-data>/output/screenshots/` at 4K (3840x2160).
 - Loop export: writes frames under `<user-data>/output/exports/` and MP4 output under `<user-data>/output/`.
 - Video encoding presets: Standard (CRF 23), High (CRF 18), Ultra (CRF 14), all using H.264 yuv420p for Windows compatibility.

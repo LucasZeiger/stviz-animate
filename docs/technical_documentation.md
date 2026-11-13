@@ -287,6 +287,11 @@ Persistent settings:
 Command line:
 - `stviz-animate <file.h5ad|file.stviz>` opens the file at startup.
 
+Labels overlay (`src/app/overlay.rs`):
+- `OverlaySettings` (title, legend, space name, scale bar, units per coordinate, label size) is saved in workspaces.
+- `overlay_content` decides what to show for the current time: the legend follows the colour key of the segment half the view is in, and the scale bar only appears while the view rests on a space whose name contains "spatial" and the sample grid is off.
+- `layout` turns that into primitives sized relative to the output (1 unit = 1 px at 1080p). The viewport draws them with egui as a preview; exports rasterize them on the CPU (`Canvas`, using the bundled Ubuntu-Light font through `ab_glyph`) into each frame after GPU readback, for both direct ffmpeg streaming and PNG frames.
+
 Workspaces (`src/app/workspace.rs`):
 - JSON, `version: 1`; fields added later are optional so older files still open.
 - Stores keyframes, colors, filters, view, sample grid, export settings and the advanced timeline layout (card positions, sizes, durations, connections).

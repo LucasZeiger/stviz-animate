@@ -23,6 +23,7 @@ mod input;
 mod keyframes;
 mod layout;
 mod left_panel;
+mod overlay;
 mod process;
 mod render_callback;
 mod settings;
@@ -243,6 +244,9 @@ pub struct StvizApp {
     sample_grid_label_mode: SampleGridLabelMode,
     sample_grid_custom_labels_obs_idx: Option<usize>,
     sample_grid_custom_labels: Vec<String>,
+
+    /// Title, legend and scale bar drawn over the view and into exports.
+    overlay: overlay::OverlaySettings,
 
     // Legend / gene input
     legend_range: Option<LegendRange>,
@@ -622,6 +626,7 @@ impl StvizApp {
             sample_grid_custom_labels_obs_idx: None,
             sample_grid_custom_labels: Vec::new(),
 
+            overlay: overlay::OverlaySettings::default(),
             legend_range: None,
             active_legend_range: None,
             gene_query: String::new(),

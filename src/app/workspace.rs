@@ -1,9 +1,10 @@
 //! Dataset/workspace file dialogs and workspace save/restore.
 
 use super::{
-    AdvancedCard, AdvancedCardFilter, AdvancedConnection, CategoricalPalette, ColorKey, ColorMode,
-    EaseMode, ExportEncodingSpeed, ExportQuality, ExportVideoQuality, KeyframeFilter, PlaybackMode,
-    SampleGridLabelMode, StvizApp, UiTheme, MAX_FILTER_CATEGORIES,
+    overlay::OverlaySettings, AdvancedCard, AdvancedCardFilter, AdvancedConnection,
+    CategoricalPalette, ColorKey, ColorMode, EaseMode, ExportEncodingSpeed, ExportQuality,
+    ExportVideoQuality, KeyframeFilter, PlaybackMode, SampleGridLabelMode, StvizApp, UiTheme,
+    MAX_FILTER_CATEGORIES,
 };
 use crate::data::{Dataset, ObsMeta};
 use anyhow::Context as _;
@@ -56,6 +57,8 @@ struct WorkspaceFile {
     export: Option<WorkspaceExport>,
     #[serde(default)]
     advanced: Option<WorkspaceAdvanced>,
+    #[serde(default)]
+    overlay: Option<OverlaySettings>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -351,6 +354,7 @@ impl StvizApp {
                 name: self.export_name.clone(),
             }),
             advanced,
+            overlay: Some(self.overlay.clone()),
         })
     }
 
@@ -538,6 +542,7 @@ impl StvizApp {
         self.ui_theme = workspace.ui_theme;
         self.show_axes = workspace.show_axes;
         self.show_stats = workspace.show_stats;
+        self.overlay = workspace.overlay.clone().unwrap_or_default();
         if workspace.camera_center.iter().all(|v| v.is_finite())
             && workspace.camera_pixels_per_unit.is_finite()
         {
