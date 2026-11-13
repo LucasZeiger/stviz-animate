@@ -92,11 +92,12 @@ impl StvizApp {
                 if busy {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label(if self.convert_running() {
-                            "Preparing data... progress is in the Conversion log on the left."
+                        let status = if self.convert_running() {
+                            self.convert_status.as_deref().unwrap_or("Preparing...")
                         } else {
                             "Loading dataset..."
-                        });
+                        };
+                        ui.label(status);
                     });
                     if self.convert_running() && ui.button("Cancel").clicked() {
                         self.cancel_convert();
@@ -117,8 +118,7 @@ impl StvizApp {
                     if demo
                         .on_hover_text(format!(
                             "Generate a synthetic spatial dataset with {} cells and load it. \
-                             Needs Python; the first run installs the converter, which takes \
-                             a few minutes.",
+                             The first time takes a few minutes.",
                             DEMO_CELLS
                         ))
                         .clicked()

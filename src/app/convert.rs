@@ -244,7 +244,14 @@ fn ensure_converter_env(
         "wheel",
     ]);
     StvizApp::apply_python_env(&mut cmd, Some(venv_dir));
-    setup_step(&mut cmd, "update pip", log, cancel)?;
+    setup_step(&mut cmd, "update pip", log, cancel).map_err(|e| match e {
+        RunError::Failed(_) => RunError::Failed(
+            "Could not finish the one-time converter setup. Check the internet \
+             connection and try again; details are in the Conversion log."
+                .to_string(),
+        ),
+        other => other,
+    })?;
 
     let requirements = project_dir.join("python").join("requirements.txt");
     let mut cmd = Command::new(&venv_python);
@@ -262,7 +269,14 @@ fn ensure_converter_env(
         cmd.args(["anndata", "h5py", "numpy", "pandas", "scipy"]);
     }
     StvizApp::apply_python_env(&mut cmd, Some(venv_dir));
-    run_script(&mut cmd, "Dependency install", log, cancel)?;
+    run_script(&mut cmd, "Dependency install", log, cancel).map_err(|e| match e {
+        RunError::Failed(_) => RunError::Failed(
+            "Could not finish the one-time converter setup. Check the internet \
+             connection and try again; details are in the Conversion log."
+                .to_string(),
+        ),
+        other => other,
+    })?;
     log("Dependencies installed.");
     Ok(venv_python)
 }
@@ -386,7 +400,9 @@ impl StvizApp {
         let lines: Vec<String> = job.rx.try_iter().collect();
         for line in lines {
             if !cancelling {
-                self.convert_status = Some(line.clone());
+                if let Some(status) = friendly_status(&line) {
+                    self.convert_status = Some(status);
+                }
             }
             self.append_convert_log(&line);
         }
@@ -504,7 +520,7 @@ impl StvizApp {
     fn start_convert_job(&mut self, req: ConvertRequest) {
         self.convert_log_text.clear();
         self.convert_log_path = req.log_path.clone();
-        self.convert_status = Some("Preparing the converter...".to_string());
+        self.convert_status = Some("Preparing...".to_string());
         self.convert_job = Some(ConvertJob::spawn(req));
     }
 
@@ -565,6 +581,37 @@ impl StvizApp {
     }
 }
 
+/// The short status shown while converting, for a line of worker output.
+/// Setup and script details stay in the log; `None` keeps the current status.
+fn friendly_status(line: &str) -> Option<String> {
+    let percent = |prefix: &str| {
+        line.strip_prefix(prefix)?
+            .trim()
+            .trim_end_matches('%')
+            .parse::<u32>()
+            .ok()
+    };
+    // Expression is scanned, then written: show both passes as one 0-100%.
+    if let Some(p) = percent("Scanning expression:") {
+        return Some(format!("Converting... {}%", p / 2));
+    }
+    if let Some(p) = percent("Writing expression:") {
+        return Some(format!("Converting... {}%", 50 + p / 2));
+    }
+    let status = if line.starts_with("Creating the converter environment")
+        || line.starts_with("Installing converter dependencies")
+    {
+        "Setting up (first time only, this takes a few minutes)..."
+    } else if line.starts_with("Generating a mock dataset") {
+        "Generating demo data..."
+    } else if line.starts_with("Converting (") {
+        "Converting..."
+    } else {
+        return None;
+    };
+    Some(status.to_string())
+}
+
 fn pick_convert_output(output_dir: &Path, stem: &str, source: &str) -> PathBuf {
     for n in 1..1000 {
         let name = if n == 1 {
@@ -587,7 +634,30 @@ fn pick_convert_output(output_dir: &Path, stem: &str, source: &str) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_convert_output;
+    use super::{friendly_status, pick_convert_output};
+
+    #[test]
+    fn status_hides_setup_details() {
+        let status = |l: &str| friendly_status(l);
+        assert_eq!(
+            status("Installing converter dependencies (first run only, needs internet)..."),
+            Some("Setting up (first time only, this takes a few minutes)...".to_string())
+        );
+        assert_eq!(status("Collecting numpy>=1.26"), None);
+        assert_eq!(status("Reading embeddings..."), None);
+        assert_eq!(
+            status("Scanning expression: 40%"),
+            Some("Converting... 20%".into())
+        );
+        assert_eq!(
+            status("Writing expression: 100%"),
+            Some("Converting... 100%".into())
+        );
+        assert_eq!(
+            status("Converting (with gene expression)..."),
+            Some("Converting...".into())
+        );
+    }
     use crate::data::test_support::write_stviz;
 
     #[test]

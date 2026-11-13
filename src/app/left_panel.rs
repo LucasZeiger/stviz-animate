@@ -81,8 +81,7 @@ impl StvizApp {
             }
         });
 
-        ui.label("Note: conversion may take a minute or two for datasets >1GB.");
-        ui.label("First-time converter setup can take a few minutes; it only happens once.");
+        ui.label("The first conversion takes a few minutes to set up; later ones are quicker.");
         ui.checkbox(
             &mut self.convert_include_expr,
             "Include gene expression data (uncheck for smaller file size)",
@@ -184,7 +183,7 @@ impl StvizApp {
         }
         ui.separator();
         egui::CollapsingHeader::new("Conversion log")
-            .default_open(true)
+            .default_open(false)
             .show(ui, |ui| {
                 if ui.button("Copy log").clicked() {
                     ui.ctx().copy_text(self.convert_log_text.clone());
@@ -1177,9 +1176,12 @@ impl StvizApp {
                     stem.truncate(stem.len().saturating_sub(4));
                 }
                 let path = self.screenshot_dir.join(format!("{stem}_{ts}.png"));
-                if let Err(err) = self.render_export_frame(SCREENSHOT_RESOLUTION, &path, false) {
-                    self.export_status = Some(format!("Screenshot failed: {err}"));
-                }
+                self.export_status = Some(
+                    match self.render_export_frame(SCREENSHOT_RESOLUTION, &path, false) {
+                        Ok(()) => format!("Saved screenshot: {}", path.display()),
+                        Err(err) => format!("Screenshot failed: {err}"),
+                    },
+                );
             }
             ui.add_space(6.0);
             ui.label("Loop export");
@@ -1287,30 +1289,36 @@ impl StvizApp {
                 self.refresh_ffmpeg_path();
             }
             let installing = self.export_job_kind() == Some(ExportJobKind::InstallFfmpeg);
+            // Without ffmpeg, export still works through the built-in fallback
+            // encoder, so the install options stay out of the way.
             if self.export_run_ffmpeg && !self.ffmpeg_available {
-                if installing {
-                    ui.colored_label(egui::Color32::YELLOW, "Installing ffmpeg...");
-                } else {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "ffmpeg not found (will try OpenCV fallback).",
-                    );
-                }
-                ui.checkbox(
-                    &mut self.ffmpeg_auto_install,
-                    "Install ffmpeg during export if missing",
-                )
-                .on_hover_text(
-                    "Uses the system package manager (winget, choco, brew, apt, dnf, pacman or \
-                     zypper). Needs internet access and may need admin rights.",
-                );
-                if ui
-                    .add_enabled(!busy, egui::Button::new("Install ffmpeg now"))
-                    .on_hover_text("Runs the system package manager in the background.")
-                    .clicked()
-                {
-                    self.start_ffmpeg_install();
-                }
+                egui::CollapsingHeader::new("Faster video encoding")
+                    .id_salt("ffmpeg_install")
+                    .show(ui, |ui| {
+                        if installing {
+                            ui.label("Installing ffmpeg...");
+                        } else {
+                            ui.label(
+                                "Videos are encoded with a built-in fallback. Installing \
+                                 ffmpeg makes exports faster and smaller.",
+                            );
+                        }
+                        ui.checkbox(
+                            &mut self.ffmpeg_auto_install,
+                            "Install ffmpeg during export if missing",
+                        )
+                        .on_hover_text(
+                            "Uses the system package manager (winget, choco, brew, apt, dnf, \
+                             pacman or zypper). Needs internet access and may need admin rights.",
+                        );
+                        if ui
+                            .add_enabled(!busy, egui::Button::new("Install ffmpeg now"))
+                            .on_hover_text("Runs the system package manager in the background.")
+                            .clicked()
+                        {
+                            self.start_ffmpeg_install();
+                        }
+                    });
             }
             let keep_forced = !self.export_run_ffmpeg;
             let mut keep_pref = self.export_keep_frames;

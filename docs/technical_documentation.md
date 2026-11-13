@@ -107,6 +107,20 @@ Expression metadata (`ExprMeta`):
 `data.rs` maps the file into memory, validates block bounds/lengths/consistency, and provides zero-copy slices. Unsupported format versions are rejected.
 
 ## Data conversion pipeline
+Design goal: users drop a `.h5ad` and it works. The managed Python environment, dependency install and progress details are kept out of the way: the UI shows short phases ("Setting up (first time only)...", "Converting... 40%"), and everything else goes to the collapsed Conversion log and `<user-data>/logs/`.
+
+User-data folder (converted files, logs, settings, the managed venv):
+- Windows: `%APPDATA%/stviz-animate/`
+- macOS: `~/Library/Application Support/stviz-animate/`
+- Linux: `${XDG_DATA_HOME:-~/.local/share}/stviz-animate/`
+
+Manual conversion:
+```
+python -m pip install -r python/requirements.txt
+python python/export_stviz.py --input your_data.h5ad --output your_data.stviz --include-expr
+```
+Optional flags: `--layer NAME` or `--use-raw` to choose the expression matrix, and `--gene-symbols COLUMN` to take gene names from a `var` column.
+
 ### `.h5ad` to `.stviz` (`python/export_stviz.py`)
 - Opens the file with `h5py` and reads only `obs`, the first two columns of each `.obsm` entry, the `*_colors` palettes and gene names (via `anndata`'s element readers). The full `AnnData` is never loaded.
 - Spaces: every `.obsm` entry with at least two numeric columns (e.g., `X_umap`, `X_pca`, `spatial`); the first two dimensions are used. Non-finite coordinates are stored as NaN (not drawn) and left out of the bbox.
@@ -232,6 +246,10 @@ Labels:
 - Output path: `<user-data>/output/screenshots/stviz-animate_screenshot_*.png`.
 - PNG encoding is lossless.
 
+### ffmpeg and the fallback encoder
+- ffmpeg is used when found (see `resolve_ffmpeg_path`). Otherwise frames are encoded with OpenCV (`python/export_video_cv2.py`), installed into the managed venv on first use, so export always works.
+- The Output panel keeps the opt-in ffmpeg install (winget/choco, brew, apt/dnf/pacman/zypper) under a collapsed **Faster video encoding** header, shown only when ffmpeg is missing. It is off by default because it runs the system package manager, which may need admin rights.
+
 ### Loop video export
 Pipeline:
 1. Render PNG frames into `<user-data>/output/exports/loop_<timestamp>/`.
@@ -320,14 +338,16 @@ Windows notes:
 - CI runs the Rust tests and the converter tests on Windows, plus `windows-end-to-end`: the ignored end-to-end test, which finds Python, creates the managed venv, installs dependencies, generates a mock dataset, converts and loads it.
 
 ## Troubleshooting
-- ffmpeg missing: ensure `ffmpeg` is on PATH or bundle it.
-- Python missing: install Python 3.9+ and add to PATH (on Windows from python.org, not the Microsoft Store).
-- Windows, dependency install fails with long-path errors: enable long paths (`LongPathsEnabled`).
-- Windows, "Could not replace ...": the `.stviz` is open in another stviz-animate window.
-- Conversion failures: the status line shows the converter's reason; the Conversion log has the details.
+- "Python not found": install Python 3.9+ from python.org (on Windows tick **Add python.exe to PATH**; the Microsoft Store version does not work), then restart the app. On Windows the `py` launcher is also found.
+- Converter setup fails: the first conversion needs internet. Behind a proxy or firewall, install the packages yourself (`python -m pip install -r python/requirements.txt`) and start the app from that environment; it prefers an active venv or conda env. The Conversion log has the pip output.
+- Windows, "path too long" during setup: enable long paths (Settings > System > For developers > *Enable long paths*, or the `LongPathsEnabled` policy) and convert again.
+- Windows, "Could not replace ... it is open in another program": the `.stviz` is open in another stviz-animate window. Close it there and convert again.
+- Windows, conversion or export blocked or very slow: some antivirus tools scan every file the converter writes. Excluding `%APPDATA%\stviz-animate` helps.
+- Video export uses the OpenCV fallback: install ffmpeg for faster, smaller exports (`winget install Gyan.FFmpeg`, `brew install ffmpeg`, `sudo apt install ffmpeg`, or **Faster video encoding** in the Output panel). winget and Chocolatey installs are found without a restart.
 - Workspace cannot find its dataset: put the `.stviz` next to the workspace file.
 - Export artifacts: verify PNG frames to isolate encoding artifacts.
 - WSL GPU: performance may be limited vs native Windows/Linux.
+- Start over: close the app and delete the user-data folder. Converted files, logs, settings and the managed Python environment are all inside it.
 
 ## Extension points
 Common areas to modify:
