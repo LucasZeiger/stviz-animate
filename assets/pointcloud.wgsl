@@ -65,8 +65,10 @@ fn vs_main(input: VsIn) -> VsOut {
     // screen_px = (p - center) * pixels_per_unit + viewport/2
     let screen_px: vec2<f32> = (p - u.center) * u.pixels_per_unit + (u.viewport_px * 0.5);
 
-    // Add constant-size point sprite in pixels:
-    let sprite_px: vec2<f32> = input.corner * u.point_radius_px;
+    // Add point sprite in pixels. Never smaller than a half-pixel radius: a
+    // 1 px quad always covers exactly one pixel centre, so points can't drop
+    // out as they move by sub-pixel amounts while zooming.
+    let sprite_px: vec2<f32> = input.corner * max(u.point_radius_px, 0.5);
     let screen2_px: vec2<f32> = screen_px + sprite_px;
 
     // Viewport pixels -> NDC (within the viewport)
@@ -85,8 +87,13 @@ fn vs_main(input: VsIn) -> VsOut {
 
 @fragment
 fn fs_main(input: VsOut) -> @location(0) vec4<f32> {
-    // Circle mask unless disabled.
-    if (u.mask_mode > 0.5 && dot(input.corner, input.corner) > 1.0) {
+    // Circle mask unless disabled. The pixel centre nearest to the point is
+    // at most ~0.707 px away (half a pixel diagonal), so never cut closer
+    // than that: tiny points would otherwise vanish when their centre landed
+    // near a pixel corner, which made them flicker while zooming.
+    let r: f32 = max(u.point_radius_px, 0.5);
+    let keep_px: f32 = max(r, 0.7072);
+    if (u.mask_mode > 0.5 && length(input.corner) * r > keep_px) {
         discard;
     }
     return input.color;

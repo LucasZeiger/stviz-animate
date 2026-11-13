@@ -51,6 +51,10 @@ pub(super) struct WorkspaceView {
     speed: f32,
     t: f32,
     point_radius_px: f32,
+    #[serde(default)]
+    point_auto_scale: Option<bool>,
+    #[serde(default)]
+    point_auto_max_px: Option<f32>,
     max_draw_points: usize,
     #[serde(default)]
     export_encoding_speed: ExportEncodingSpeed,
@@ -333,6 +337,8 @@ impl StvizApp {
             speed: self.speed,
             t: self.t,
             point_radius_px: self.point_radius_px,
+            point_auto_scale: Some(self.point_auto_scale),
+            point_auto_max_px: Some(self.point_auto_max_px),
             max_draw_points: self.max_draw_points,
             export_encoding_speed: self.export_encoding_speed,
             background_rgba: [bg.r(), bg.g(), bg.b(), bg.a()],
@@ -548,6 +554,12 @@ impl StvizApp {
         };
         if workspace.point_radius_px.is_finite() && workspace.point_radius_px > 0.0 {
             self.point_radius_px = workspace.point_radius_px;
+        }
+        self.point_auto_scale = workspace.point_auto_scale.unwrap_or(false);
+        if let Some(max_px) = workspace.point_auto_max_px {
+            if max_px.is_finite() && max_px > 0.0 {
+                self.point_auto_max_px = max_px;
+            }
         }
         self.max_draw_points = workspace.max_draw_points;
         self.export_encoding_speed = workspace.export_encoding_speed;
@@ -780,6 +792,7 @@ mod tests {
                 && ws.view.export.is_none()
                 && ws.dataset_file_name.is_none()
         );
+        assert!(ws.view.point_auto_scale.is_none() && ws.view.point_auto_max_px.is_none());
     }
 
     #[test]

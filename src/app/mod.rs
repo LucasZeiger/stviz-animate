@@ -19,6 +19,7 @@ mod dataset;
 mod env;
 mod export;
 mod export_job;
+mod fit_text;
 mod help;
 mod input;
 mod keyframes;
@@ -126,6 +127,10 @@ pub struct StvizApp {
     playback_mode: PlaybackMode,
     ease_mode: EaseMode,
     point_radius_px: f32,
+    /// Scale points with zoom (fixed size in world units) instead of fixed pixels.
+    point_auto_scale: bool,
+    /// Largest radius (logical px) auto-scaling may grow points to.
+    point_auto_max_px: f32,
     max_draw_points: usize,
     fast_render: bool,
 
@@ -520,6 +525,8 @@ impl StvizApp {
             playback_mode: PlaybackMode::PingPong,
             ease_mode: EaseMode::Smoothstep,
             point_radius_px: 0.5,
+            point_auto_scale: false,
+            point_auto_max_px: 12.0,
             max_draw_points: 0,
             fast_render: cpu_adapter,
 
@@ -748,7 +755,8 @@ impl eframe::App for StvizApp {
         egui::SidePanel::left("left_panel")
             .resizable(true)
             .default_width(320.0)
-            .max_width(480.0)
+            .min_width(fit_text::LEFT_PANEL_MIN_WIDTH)
+            .max_width(fit_text::left_panel_max_width(ctx.content_rect().width()))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])

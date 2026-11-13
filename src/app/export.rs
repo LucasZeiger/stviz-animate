@@ -6,7 +6,9 @@ use super::{
         ExportJobKind, JobOutcome,
     },
     overlay::Canvas,
-    util::{apply_ease, chrono_like_timestamp, obs_name},
+    util::{
+        apply_ease, chrono_like_timestamp, effective_point_radius, obs_name, zoom_relative_to_fit,
+    },
     ColorKey, DirectVideoExport, ExportQuality, StvizApp,
 };
 use crate::{
@@ -529,7 +531,21 @@ impl StvizApp {
         let (active_from, active_to, color_from, color_to, segment_t, _seg_idx) =
             self.current_segment(&ds);
         let viewport_px = [size[0] as f32, size[1] as f32];
+        // How much bigger (or smaller) the export is than the on-screen viewport.
+        let export_scale = if self.last_viewport_px[0] > 0.0 && self.last_viewport_px[1] > 0.0 {
+            let scale_x = size[0] as f32 / self.last_viewport_px[0];
+            let scale_y = size[1] as f32 / self.last_viewport_px[1];
+            scale_x.min(scale_y)
+        } else {
+            1.0
+        };
         let mut view_camera = self.export_camera.unwrap_or(self.camera);
+        if self.export_camera.is_none() && !use_export_bbox {
+            // Screenshot of the current view: keep the same framing at the
+            // export resolution instead of revealing more of the plot.
+            view_camera.pixels_per_unit =
+                (view_camera.pixels_per_unit * export_scale).clamp(1e-6, 1e9);
+        }
         if use_export_bbox && self.export_camera.is_none() {
             let bbox = self
                 .current_plot_bbox_for_segment(
@@ -573,20 +589,22 @@ impl StvizApp {
         } else {
             0.0
         };
-        let mut point_radius_px = self.point_radius_px;
-        if self.last_viewport_points.width() > 0.0 {
-            let ppp = self.last_viewport_px[0] / self.last_viewport_points.width();
-            point_radius_px *= ppp;
-        }
-        if self.last_viewport_px[0] > 0.0 && self.last_viewport_px[1] > 0.0 {
-            let scale_x = size[0] as f32 / self.last_viewport_px[0];
-            let scale_y = size[1] as f32 / self.last_viewport_px[1];
-            let export_scale = scale_x.min(scale_y);
-            if export_scale > 1.0 {
-                point_radius_px *= export_scale;
-            }
-        }
-        point_radius_px = point_radius_px.max(1.0);
+        // Same sizing as the viewport (DPI, then export resolution), so the
+        // export looks like what is on screen.
+        let ppp = if self.last_viewport_points.width() > 0.0 {
+            self.last_viewport_px[0] / self.last_viewport_points.width()
+        } else {
+            1.0
+        };
+        let px_scale = ppp * export_scale;
+        let point_radius_px = effective_point_radius(
+            self.point_radius_px * px_scale,
+            self.point_auto_scale,
+            zoom_relative_to_fit(view_camera.pixels_per_unit, viewport_px),
+            self.point_auto_max_px * px_scale,
+        )
+        // 4x MSAA spreads a 1 px point over several pixels and dims it.
+        .max(1.0);
         let uniforms = Uniforms {
             viewport_px,
             _pad0: [0.0; 2],

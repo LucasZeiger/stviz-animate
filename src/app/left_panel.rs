@@ -5,6 +5,7 @@ use super::{
     env::sanitize_file_name,
     export::SCREENSHOT_RESOLUTION,
     export_job::ExportJobKind,
+    fit_text::{fitted_combo, selectable_name, truncated_label},
     util::{
         categorical_obs, chrono_like_timestamp, color32_from_packed, continuous_obs,
         format_scale_value, obs_name,
@@ -387,7 +388,7 @@ impl StvizApp {
     fn ui_dataset_info(&mut self, ui: &mut egui::Ui, ds: &Dataset) {
         ui.label(format!("Points: {}", ds.meta.n_points));
         if let Some(p) = self.dataset_path.as_ref() {
-            ui.label(p.display().to_string());
+            truncated_label(ui, p.display().to_string());
         }
 
         ui.separator();
@@ -421,15 +422,13 @@ impl StvizApp {
                     .unwrap_or_else(|| options[0].1.clone());
 
                 let mut new_idx = self.sample_grid_obs_idx.unwrap_or(options[0].0);
-                egui::ComboBox::from_label("Group by")
-                    .selected_text(current)
-                    .show_ui(ui, |ui| {
-                        for (i, n) in &options {
-                            if ui.selectable_value(&mut new_idx, *i, n).changed() {
-                                grid_changed = true;
-                            }
+                fitted_combo(ui, "Group by", None, &current, |ui| {
+                    for (i, n) in &options {
+                        if ui.selectable_value(&mut new_idx, *i, n).changed() {
+                            grid_changed = true;
                         }
-                    });
+                    }
+                });
                 self.sample_grid_obs_idx = Some(new_idx);
 
                 if let Some(idx) = self.sample_grid_obs_idx {
@@ -450,21 +449,25 @@ impl StvizApp {
             }
 
             let mut space_idx = self.sample_grid_space_idx.unwrap_or(0);
-            egui::ComboBox::from_label("Grid space (most likely spatial)")
-                .selected_text(
-                    ds.meta
-                        .spaces
-                        .get(space_idx)
-                        .map(|s| s.name.as_str())
-                        .unwrap_or("?"),
-                )
-                .show_ui(ui, |ui| {
+            let space_name = ds
+                .meta
+                .spaces
+                .get(space_idx)
+                .map(|s| s.name.as_str())
+                .unwrap_or("?");
+            fitted_combo(
+                ui,
+                "Grid space (most likely spatial)",
+                None,
+                space_name,
+                |ui| {
                     for (i, s) in ds.meta.spaces.iter().enumerate() {
                         if ui.selectable_value(&mut space_idx, i, &s.name).changed() {
                             grid_changed = true;
                         }
                     }
-                });
+                },
+            );
             self.sample_grid_space_idx = Some(space_idx);
 
             if ui
@@ -526,7 +529,7 @@ impl StvizApp {
                                                     self.sample_grid_custom_labels.get_mut(i)
                                                 {
                                                     let edit_width =
-                                                        (ui.available_width() - 8.0).max(120.0);
+                                                        (ui.available_width() - 8.0).max(60.0);
                                                     ui.add_sized(
                                                         [edit_width, row_height],
                                                         egui::TextEdit::singleline(val),
@@ -608,19 +611,16 @@ impl StvizApp {
                         .unwrap_or_else(|| options[0].1.clone());
 
                     let mut changed = false;
-                    egui::ComboBox::from_label("Obs (cat)")
-                        .width(200.0)
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (i, n) in options {
-                                if ui
-                                    .selectable_value(&mut self.active_obs_idx, i, n)
-                                    .changed()
-                                {
-                                    changed = true;
-                                }
+                    fitted_combo(ui, "Obs (cat)", Some(200.0), &current, |ui| {
+                        for (i, n) in options {
+                            if ui
+                                .selectable_value(&mut self.active_obs_idx, i, n)
+                                .changed()
+                            {
+                                changed = true;
                             }
-                        });
+                        }
+                    });
                     if changed {
                         self.load_filter_state(ds);
                         self.filter_popup_open = false;
@@ -897,14 +897,11 @@ impl StvizApp {
                         .map(|(_, n)| n.clone())
                         .unwrap_or_else(|| options[0].1.clone());
 
-                    egui::ComboBox::from_label("Obs (cont)")
-                        .width(200.0)
-                        .selected_text(current)
-                        .show_ui(ui, |ui| {
-                            for (i, n) in options {
-                                ui.selectable_value(&mut self.active_obs_idx, i, n);
-                            }
-                        });
+                    fitted_combo(ui, "Obs (cont)", Some(200.0), &current, |ui| {
+                        for (i, n) in options {
+                            ui.selectable_value(&mut self.active_obs_idx, i, n);
+                        }
+                    });
 
                     if ui
                         .button("Apply continuous")
@@ -928,7 +925,7 @@ impl StvizApp {
                         }
                     });
                     if let Some(selected) = self.gene_selected.as_ref() {
-                        ui.label(format!("Selected: {selected}"));
+                        truncated_label(ui, format!("Selected: {selected}"));
                     }
                     let needle = self.gene_query.trim().to_ascii_lowercase();
                     let mut total = 0usize;
@@ -952,7 +949,7 @@ impl StvizApp {
                                     .as_ref()
                                     .map(|g| g == name)
                                     .unwrap_or(false);
-                                if ui.selectable_label(is_selected, name).clicked() {
+                                if selectable_name(ui, is_selected, name).clicked() {
                                     self.gene_selected = Some(name.clone());
                                     apply_gene = Some(name.clone());
                                 }
@@ -985,7 +982,7 @@ impl StvizApp {
                 .max_height(90.0)
                 .show(ui, |ui| {
                     for obs_idx in active {
-                        ui.label(obs_name(ds, obs_idx));
+                        truncated_label(ui, obs_name(ds, obs_idx));
                     }
                 });
             if ui
@@ -1030,6 +1027,23 @@ impl StvizApp {
                 .changed()
             {
                 self.point_radius_px = manual_value;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.point_auto_scale, "auto-scale with zoom")
+                .on_hover_text(
+                    "Points keep their size in data space: they match the radius above \
+                     at the fitted view and grow as you zoom in.",
+                );
+            if self.point_auto_scale {
+                ui.add(
+                    egui::DragValue::new(&mut self.point_auto_max_px)
+                        .speed(0.25)
+                        .range(1.0..=64.0)
+                        .prefix("max ")
+                        .suffix(" px"),
+                )
+                .on_hover_text("Largest radius points can grow to when zoomed in.");
             }
         });
         if ds.meta.n_points > 0 {
@@ -1431,13 +1445,13 @@ fn render_filter_rows(
                 }
                 *colors_changed = true;
             }
-            ui.label(c);
+            truncated_label(ui, c);
         });
     }
 }
 
 fn draw_gradient_legend(ui: &mut egui::Ui, label: &str, vmin: f32, vmax: f32) {
-    ui.label(label);
+    truncated_label(ui, label);
     let (rect, _) = ui.allocate_exact_size(egui::vec2(180.0, 14.0), egui::Sense::hover());
     let steps = 32;
     let seg_w = rect.width() / steps as f32;
