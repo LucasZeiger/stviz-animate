@@ -127,6 +127,7 @@ impl StvizApp {
                 ui.label(status);
             }
         }
+        self.ui_install_python_button(ui);
 
         ui.separator();
         ui.label("Convert .h5ad or load .stviz");

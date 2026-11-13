@@ -103,6 +103,13 @@ impl StvizApp {
                         self.cancel_convert();
                     }
                 } else {
+                    if self.can_install_python() {
+                        if let Some(status) = self.convert_status.clone() {
+                            ui.label(status);
+                        }
+                        self.ui_install_python_button(ui);
+                        ui.add_space(12.0);
+                    }
                     let open = ui.add_sized(
                         [220.0, 32.0],
                         egui::Button::new(egui::RichText::new("Open a dataset...").size(16.0)),

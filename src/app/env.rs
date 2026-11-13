@@ -36,12 +36,25 @@ impl StvizApp {
                 Err(msg) => errors.push(msg),
             }
         }
+        // Standard install folders, so Python is found even when it isn't on
+        // PATH, and right after the app installed it (PATH changes only reach
+        // newly started programs).
+        if cfg!(windows) {
+            let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+            let program_files = std::env::var_os("ProgramFiles").map(PathBuf::from);
+            for exe in windows_python_locations(local.as_deref(), program_files.as_deref()) {
+                let exe = exe.display().to_string();
+                match Self::check_python_cmd(&exe) {
+                    Ok(result) => return Ok(result),
+                    Err(msg) => errors.push(msg),
+                }
+            }
+        }
         if let Some(result) = store_python {
             return Ok(result);
         }
         let hint = if cfg!(windows) {
-            "Install Python 3.9 or newer from python.org (tick \"Add python.exe to PATH\"), \
-             then restart the app. The Microsoft Store shortcut named `python` is not enough."
+            "Use Install Python below, or install Python 3.9 or newer from python.org."
         } else {
             "Install Python 3.9 or newer (e.g. `sudo apt install python3 python3-venv`, or \
              python.org on macOS), then restart the app."
@@ -389,6 +402,38 @@ impl StvizApp {
     }
 }
 
+/// Where python.org installers put Python on Windows, newest version first:
+/// per-user (`%LOCALAPPDATA%\Programs\Python\Python3XY`), then all-users
+/// (`%ProgramFiles%\Python3XY`).
+pub(super) fn windows_python_locations(
+    local_appdata: Option<&Path>,
+    program_files: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let roots = [
+        local_appdata.map(|d| d.join("Programs").join("Python")),
+        program_files.map(Path::to_path_buf),
+    ];
+    for root in roots.into_iter().flatten() {
+        let Ok(entries) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        let mut found: Vec<(u32, PathBuf)> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                // "Python312" -> 12; skip 32-bit "-32" and other folders.
+                let minor = name.strip_prefix("Python3")?.parse::<u32>().ok()?;
+                let exe = entry.path().join("python.exe");
+                exe.is_file().then_some((minor, exe))
+            })
+            .collect();
+        found.sort_by(|a, b| b.0.cmp(&a.0));
+        out.extend(found.into_iter().map(|(_, exe)| exe));
+    }
+    out
+}
+
 /// `ffmpeg.exe` inside a winget package folder (Gyan.FFmpeg*), if installed.
 fn find_winget_ffmpeg(packages: &Path) -> Option<PathBuf> {
     let entries = std::fs::read_dir(packages).ok()?;
@@ -458,8 +503,40 @@ const MIN_PYTHON_VERSION: (u32, u32) = (3, 9);
 
 #[cfg(test)]
 mod tests {
-    use super::{display_path, is_store_python, sanitize_file_name};
+    use super::{display_path, is_store_python, sanitize_file_name, windows_python_locations};
     use std::path::Path;
+
+    #[test]
+    fn python_install_folders_are_found_newest_first() {
+        let base = std::env::temp_dir().join(format!("stviz_pyloc_{}", std::process::id()));
+        let local = base.join("local");
+        let pf = base.join("pf");
+        let user = local.join("Programs").join("Python");
+        for dir in [
+            user.join("Python39"),
+            user.join("Python312"),
+            user.join("Python311-32"),
+            user.join("Launcher"),
+            pf.join("Python310"),
+            pf.join("Python313"),
+        ] {
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("python.exe"), b"").unwrap();
+        }
+        // A folder without python.exe is ignored.
+        std::fs::create_dir_all(user.join("Python314")).unwrap();
+
+        let found = windows_python_locations(Some(&local), Some(&pf));
+        let expected = vec![
+            user.join("Python312").join("python.exe"),
+            user.join("Python39").join("python.exe"),
+            pf.join("Python313").join("python.exe"),
+            pf.join("Python310").join("python.exe"),
+        ];
+        assert_eq!(found, expected);
+        assert!(windows_python_locations(None, None).is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn file_names_are_made_safe_for_windows() {

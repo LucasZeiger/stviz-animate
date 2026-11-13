@@ -22,7 +22,7 @@ Windows:
 2) Extract it (right-click > **Extract All...**).
 3) Run `stviz-animate.exe`. If Windows says "Windows protected your PC", click **More info** > **Run anyway** (the build is not signed).
 
-To convert `.h5ad` files, Python 3.9 or newer needs to be installed ([python.org](https://www.python.org/downloads/); on Windows tick **Add python.exe to PATH**). Everything else is set up automatically the first time.
+To convert `.h5ad` files, Python 3.9 or newer needs to be installed ([python.org](https://www.python.org/downloads/)). On Windows, if it isn't, the app shows an **Install Python** button that installs it for you. Everything else is set up automatically the first time.
 
 macOS (Apple Silicon):
 1) Download `stviz-animate-mac.zip` from GitHub Releases and unzip it.

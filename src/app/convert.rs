@@ -11,6 +11,7 @@ use super::{
     StvizApp,
 };
 use crate::data::Dataset;
+use eframe::egui;
 use rand::Rng;
 use std::{
     io::Write,
@@ -43,6 +44,10 @@ pub(super) struct ConvertResult {
 pub(super) struct ConvertJob {
     rx: mpsc::Receiver<String>,
     cancel: Arc<AtomicBool>,
+    /// Set by the worker when it stopped because no usable Python was found.
+    python_missing: Arc<AtomicBool>,
+    /// What was asked for, so it can be run again after installing Python.
+    request: ConvertRequest,
     handle: JoinHandle<Result<ConvertResult, String>>,
 }
 
@@ -51,6 +56,9 @@ impl ConvertJob {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = cancel.clone();
+        let python_missing = Arc::new(AtomicBool::new(false));
+        let worker_python_missing = python_missing.clone();
+        let request = req.clone();
         let handle = std::thread::spawn(move || {
             let mut log_file = req.log_path.as_ref().and_then(|p| {
                 std::fs::OpenOptions::new()
@@ -65,7 +73,7 @@ impl ConvertJob {
                 }
                 let _ = tx.send(line.to_string());
             };
-            let result = run_convert(&req, &mut log, &worker_cancel);
+            let result = run_convert(&req, &mut log, &worker_cancel, &worker_python_missing);
             if result.is_err() {
                 req.remove_partial_outputs();
             }
@@ -83,7 +91,13 @@ impl ConvertJob {
                 }
             })
         });
-        Self { rx, cancel, handle }
+        Self {
+            rx,
+            cancel,
+            python_missing,
+            request,
+            handle,
+        }
     }
 
     pub(super) fn cancel(&self) {
@@ -101,13 +115,17 @@ impl ConvertJob {
     }
 }
 
+#[derive(Clone)]
 struct MockRequest {
     cells: u32,
     seed: u64,
 }
 
-struct ConvertRequest {
+#[derive(Clone)]
+pub(super) struct ConvertRequest {
     mock: Option<MockRequest>,
+    /// Install Python first if none is found (the user clicked Install Python).
+    install_python: bool,
     input: PathBuf,
     output: PathBuf,
     /// Stored in the .stviz so a later conversion can tell whose output it is.
@@ -190,14 +208,32 @@ fn run_script(
 /// Make sure the managed venv exists and has the converter dependencies.
 /// Returns the venv's Python. Needs internet only when something is missing.
 fn ensure_converter_env(
-    project_dir: &Path,
-    venv_dir: &Path,
+    req: &ConvertRequest,
     log: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
+    python_missing: &AtomicBool,
 ) -> Result<PathBuf, RunError> {
+    let (project_dir, venv_dir) = (req.project_dir.as_path(), req.venv_dir.as_path());
     let venv_python = StvizApp::venv_python_path(venv_dir);
     if !venv_python.exists() {
-        let (python_cmd, python_exe) = StvizApp::detect_python_cmd()?;
+        let (python_cmd, python_exe) = match StvizApp::detect_python_cmd() {
+            Ok(found) => found,
+            Err(_) if req.install_python => {
+                install_python(log, cancel)?;
+                StvizApp::detect_python_cmd().map_err(|msg| {
+                    log(&msg);
+                    RunError::Failed(
+                        "Python was installed, but the app can't use it yet. Restart the \
+                         app and convert again."
+                            .to_string(),
+                    )
+                })?
+            }
+            Err(msg) => {
+                python_missing.store(true, Ordering::Relaxed);
+                return Err(RunError::Failed(msg));
+            }
+        };
         log(&format!("Using Python: {python_exe}"));
         log("Creating the converter environment (first run only)...");
         let mut cmd = Command::new(&python_cmd);
@@ -281,6 +317,127 @@ fn ensure_converter_env(
     Ok(venv_python)
 }
 
+/// Python version installed by the Install Python button. 3.12 has wheels for
+/// every converter dependency.
+const PYTHON_WINGET_ID: &str = "Python.Python.3.12";
+const PYTHON_ORG_VERSION: &str = "3.12.10";
+
+/// Install Python for the current user (no admin rights): through winget if
+/// it is available, otherwise with the python.org installer in silent mode.
+fn install_python(log: &mut dyn FnMut(&str), cancel: &AtomicBool) -> Result<(), RunError> {
+    log("Installing Python (first time only)...");
+    let mut winget = Command::new("winget");
+    winget.args([
+        "install",
+        "-e",
+        "--id",
+        PYTHON_WINGET_ID,
+        "--scope",
+        "user",
+        "--silent",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+        "--disable-interactivity",
+    ]);
+    StvizApp::apply_subprocess_flags(&mut winget);
+    log(&format!(
+        "winget install -e --id {PYTHON_WINGET_ID} --scope user"
+    ));
+    match run_cancellable(&mut winget, cancel) {
+        Ok(out) => {
+            log_output(log, &out.stdout, &out.stderr);
+            // winget also exits non-zero when it is already installed, so
+            // check for Python rather than the exit code.
+            if StvizApp::detect_python_cmd().is_ok() {
+                log("Python installed.");
+                return Ok(());
+            }
+            log(&format!("winget did not install Python ({}).", out.status));
+        }
+        Err(RunError::Cancelled) => return Err(RunError::Cancelled),
+        Err(RunError::Failed(e)) => log(&format!("winget is not available: {e}")),
+    }
+    install_python_from_python_org(log, cancel)
+}
+
+fn log_output(log: &mut dyn FnMut(&str), stdout: &[u8], stderr: &[u8]) {
+    for stream in [stdout, stderr] {
+        let text = String::from_utf8_lossy(stream);
+        if !text.trim().is_empty() {
+            log(text.trim());
+        }
+    }
+}
+
+/// Download the python.org installer and run it silently for this user.
+fn install_python_from_python_org(
+    log: &mut dyn FnMut(&str),
+    cancel: &AtomicBool,
+) -> Result<(), RunError> {
+    let arch = if std::env::consts::ARCH == "aarch64" {
+        "arm64"
+    } else {
+        "amd64"
+    };
+    let file = format!("python-{PYTHON_ORG_VERSION}-{arch}.exe");
+    let url = format!("https://www.python.org/ftp/python/{PYTHON_ORG_VERSION}/{file}");
+    let dir = std::env::temp_dir().join("stviz-animate-python");
+    let _ = std::fs::create_dir_all(&dir);
+    let installer = dir.join(&file);
+    let failed = |what: &str| {
+        RunError::Failed(format!(
+            "Could not install Python ({what}). Check the internet connection and try \
+             again, or install Python from python.org."
+        ))
+    };
+
+    log(&format!("Downloading {url}"));
+    // Single quotes in a PowerShell string are escaped by doubling them.
+    let quoted = |s: &str| format!("'{}'", s.replace('\'', "''"));
+    let script = format!(
+        "$ProgressPreference = 'SilentlyContinue'; \
+         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; \
+         Invoke-WebRequest -UseBasicParsing -Uri {} -OutFile {}",
+        quoted(&url),
+        quoted(&installer.display().to_string())
+    );
+    let mut download = Command::new("powershell");
+    download.args(["-NoProfile", "-NonInteractive", "-Command", &script]);
+    StvizApp::apply_subprocess_flags(&mut download);
+    let out = run_cancellable(&mut download, cancel).map_err(|e| match e {
+        RunError::Failed(_) => failed("download failed"),
+        other => other,
+    })?;
+    log_output(log, &out.stdout, &out.stderr);
+    if !out.status.success() || !installer.is_file() {
+        return Err(failed("download failed"));
+    }
+
+    log("Running the Python installer...");
+    let mut install = Command::new(&installer);
+    install.args([
+        "/quiet",
+        "InstallAllUsers=0",
+        "PrependPath=1",
+        "Include_launcher=1",
+        "InstallLauncherAllUsers=0",
+        "Include_test=0",
+    ]);
+    StvizApp::apply_subprocess_flags(&mut install);
+    let result = run_cancellable(&mut install, cancel);
+    let _ = std::fs::remove_file(&installer);
+    let out = result.map_err(|e| match e {
+        RunError::Failed(_) => failed("the installer did not start"),
+        other => other,
+    })?;
+    log_output(log, &out.stdout, &out.stderr);
+    if !out.status.success() {
+        return Err(failed(&format!("installer exit {}", out.status)));
+    }
+    log("Python installed.");
+    Ok(())
+}
+
 fn python_script_command(venv_python: &Path, venv_dir: &Path, project_dir: &Path) -> Command {
     let mut cmd = Command::new(venv_python);
     cmd.arg("-X")
@@ -296,6 +453,7 @@ fn run_convert(
     req: &ConvertRequest,
     log: &mut dyn FnMut(&str),
     cancel: &AtomicBool,
+    python_missing: &AtomicBool,
 ) -> Result<ConvertResult, RunError> {
     let scripts = req.project_dir.join("python");
     let exporter = scripts.join("export_stviz.py");
@@ -316,7 +474,7 @@ fn run_convert(
     }
     log(&format!("Output file: {}", req.output.display()));
 
-    let venv_python = ensure_converter_env(&req.project_dir, &req.venv_dir, log, cancel)?;
+    let venv_python = ensure_converter_env(req, log, cancel, python_missing)?;
 
     if let Some(mock) = req.mock.as_ref() {
         let generator = scripts.join("mock_spatial_dataset.py");
@@ -424,7 +582,16 @@ impl StvizApp {
                     self.start_dataset_load(&result.output);
                 }
             }
-            Ok(Err(msg)) => self.convert_status = Some(msg),
+            Ok(Err(msg)) => {
+                // On Windows, offer to install Python and then run this again.
+                if cfg!(windows) && job.python_missing.load(Ordering::Relaxed) {
+                    self.convert_status =
+                        Some("Python is needed to convert .h5ad files.".to_string());
+                    self.convert_retry = Some(job.request);
+                } else {
+                    self.convert_status = Some(msg);
+                }
+            }
             Err(_) => self.convert_status = Some("Conversion failed unexpectedly.".to_string()),
         }
     }
@@ -466,6 +633,7 @@ impl StvizApp {
             .join(format!("convert_log_{}.txt", chrono_like_timestamp()));
         self.start_convert_job(ConvertRequest {
             mock: None,
+            install_python: false,
             input: path.to_path_buf(),
             output,
             source,
@@ -502,6 +670,7 @@ impl StvizApp {
                 cells,
                 seed: rand::thread_rng().gen(),
             }),
+            install_python: false,
             source: h5ad.display().to_string(),
             input: h5ad,
             output: stviz,
@@ -517,7 +686,42 @@ impl StvizApp {
         });
     }
 
+    /// Whether the last conversion stopped for lack of Python and can be
+    /// retried with [`Self::install_python_and_retry`].
+    pub(super) fn can_install_python(&self) -> bool {
+        self.convert_retry.is_some() && !self.convert_running()
+    }
+
+    /// The Install Python button: install it, then run the conversion again.
+    pub(super) fn install_python_and_retry(&mut self) {
+        if self.convert_running() {
+            return;
+        }
+        if let Some(mut req) = self.convert_retry.take() {
+            req.install_python = true;
+            self.start_convert_job(req);
+        }
+    }
+
+    /// The Install Python button with its explanation.
+    pub(super) fn ui_install_python_button(&mut self, ui: &mut egui::Ui) {
+        if !self.can_install_python() {
+            return;
+        }
+        if ui
+            .button("Install Python")
+            .on_hover_text(
+                "Installs Python 3.12 for your user account (no admin rights needed) and \
+                 then continues. Needs internet and takes a few minutes.",
+            )
+            .clicked()
+        {
+            self.install_python_and_retry();
+        }
+    }
+
     fn start_convert_job(&mut self, req: ConvertRequest) {
+        self.convert_retry = None;
         self.convert_log_text.clear();
         self.convert_log_path = req.log_path.clone();
         self.convert_status = Some("Preparing...".to_string());
@@ -598,7 +802,9 @@ fn friendly_status(line: &str) -> Option<String> {
     if let Some(p) = percent("Writing expression:") {
         return Some(format!("Converting... {}%", 50 + p / 2));
     }
-    let status = if line.starts_with("Creating the converter environment")
+    let status = if line.starts_with("Installing Python") {
+        "Installing Python (first time only, this takes a few minutes)..."
+    } else if line.starts_with("Creating the converter environment")
         || line.starts_with("Installing converter dependencies")
     {
         "Setting up (first time only, this takes a few minutes)..."
@@ -709,6 +915,7 @@ mod tests {
                 cells: 10_000,
                 seed: 7,
             }),
+            install_python: false,
             input: dir.join("mock.h5ad"),
             output: output.clone(),
             source: "mock".to_string(),
@@ -731,5 +938,50 @@ mod tests {
         assert!(ds.meta.expr.is_some());
         assert!(!dir.join("mock.stviz.partial").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs both Python install paths for real. Windows only; it installs
+    /// Python for the current user, so it runs in CI: `cargo test -- --ignored`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn installs_python_for_the_user() {
+        use super::{install_python, install_python_from_python_org};
+        use crate::app::env::windows_python_locations;
+        use std::sync::atomic::AtomicBool;
+
+        let cancel = AtomicBool::new(false);
+        let mut lines = Vec::new();
+        let mut log = |l: &str| lines.push(l.to_string());
+
+        install_python_from_python_org(&mut log, &cancel)
+            .unwrap_or_else(|_| panic!("python.org install failed:\n{}", lines.join("\n")));
+        let local = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap());
+        let exe = local
+            .join("Programs")
+            .join("Python")
+            .join("Python312")
+            .join("python.exe");
+        assert!(
+            exe.is_file(),
+            "{} missing\n{}",
+            exe.display(),
+            lines.join("\n")
+        );
+        assert!(windows_python_locations(Some(&local), None).contains(&exe));
+        let out = std::process::Command::new(&exe)
+            .arg("--version")
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("3.12"));
+
+        // The full button path (winget first) must also end with Python found.
+        let mut lines = Vec::new();
+        let mut log = |l: &str| lines.push(l.to_string());
+        assert!(
+            install_python(&mut log, &cancel).is_ok(),
+            "{}",
+            lines.join("\n")
+        );
     }
 }
