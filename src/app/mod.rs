@@ -19,6 +19,7 @@ mod dataset;
 mod env;
 mod export;
 mod export_job;
+mod fit_text;
 mod help;
 mod input;
 mod keyframes;
@@ -744,7 +745,8 @@ impl eframe::App for StvizApp {
         egui::SidePanel::left("left_panel")
             .resizable(true)
             .default_width(320.0)
-            .max_width(480.0)
+            .min_width(fit_text::LEFT_PANEL_MIN_WIDTH)
+            .max_width(fit_text::left_panel_max_width(ctx.content_rect().width()))
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical()
                     .auto_shrink([false; 2])
