@@ -39,6 +39,7 @@ impl StvizApp {
         self.ui_color_section(ui, &ds);
         self.ui_filters_and_legend(ui, &ds);
         self.ui_rendering_section(ui, &ds);
+        self.ui_labels_section(ui, &ds);
         self.ui_output_section(ui);
     }
 
@@ -1054,6 +1055,71 @@ impl StvizApp {
     }
 
     /// Screenshot and video export controls and the export log.
+    /// Title, legend and scale bar drawn over the view and into exports.
+    fn ui_labels_section(&mut self, ui: &mut egui::Ui, ds: &Dataset) {
+        ui.separator();
+        let o = &mut self.overlay;
+        ui.checkbox(&mut o.enabled, "Show labels on view and exports")
+            .on_hover_text(
+                "Draw a title, legend and scale bar over the points. They appear in \
+                 the viewport and are burned into screenshots and videos.",
+            );
+        if !o.enabled {
+            return;
+        }
+        ui.indent("labels_section", |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Title");
+                ui.add(
+                    egui::TextEdit::singleline(&mut o.title)
+                        .hint_text("Optional, e.g. sample name")
+                        .desired_width(170.0),
+                );
+            });
+            ui.checkbox(&mut o.show_legend, "Legend")
+                .on_hover_text("Categories or colour bar for the colouring on screen.");
+            ui.checkbox(&mut o.show_space_name, "Space name")
+                .on_hover_text(
+                    "Show the coordinate space, e.g. \"spatial to X_umap\" during a transition.",
+                );
+            let has_spatial = ds
+                .meta
+                .spaces
+                .iter()
+                .any(|s| super::overlay::is_spatial_space(&s.name));
+            ui.add_enabled_ui(has_spatial, |ui| {
+                ui.checkbox(&mut o.show_scale_bar, "Scale bar")
+                    .on_hover_text(
+                        "Shown on spaces with \"spatial\" in their name, while the view rests \
+                     on that space and the sample grid is off.",
+                    );
+            })
+            .response
+            .on_disabled_hover_text("No space with \"spatial\" in its name.");
+            if has_spatial && o.show_scale_bar {
+                ui.horizontal(|ui| {
+                    ui.label("1 coordinate =");
+                    ui.add(
+                        egui::DragValue::new(&mut o.units_per_coord)
+                            .range(1e-6..=1e6)
+                            .speed(0.01),
+                    )
+                    .on_hover_text(
+                        "Physical size of one coordinate unit. Visium spot coordinates \
+                         are usually in full-resolution image pixels; Xenium and \
+                         MERFISH coordinates are usually already in µm.",
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut o.unit_label).desired_width(40.0));
+                });
+            }
+            ui.add(
+                egui::Slider::new(&mut o.text_scale, 0.5..=2.0)
+                    .text("Label size")
+                    .fixed_decimals(2),
+            );
+        });
+    }
+
     fn ui_output_section(&mut self, ui: &mut egui::Ui) {
         ui.separator();
         let busy = self.export_busy();

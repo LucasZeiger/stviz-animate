@@ -15,11 +15,13 @@ icon = ["assets/icon.icns"]
 resources = ["python"]
 
 [dependencies]
+ab_glyph = "0.2.32"
 anyhow = "1.0"
 bytemuck = { version = "1.24", features = ["derive"] }
 colorous = "1.0.16"
 eframe = { version = "0.33.3", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
 egui-wgpu = "0.33.3"
+epaint_default_fonts = "0.33.3"
 image = "0.25"
 memmap2 = "0.9"
 parking_lot = "0.12"
