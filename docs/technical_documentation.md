@@ -1,6 +1,6 @@
 # stviz-animate Technical Documentation
 
-Last updated: 2026-11-11
+Last updated: 2026-11-13
 
 ## Table of contents
 - Overview
@@ -271,9 +271,12 @@ Bundle notes:
 - Windows bundle can ship `ffmpeg.exe` alongside the executable.
 
 ## Configuration and environment
-Python selection:
-- Prefers active venv/conda, then system `python` / `python3`.
+Python selection (`detect_python_cmd` in `src/app/env.rs`):
+- Prefers an active venv/conda (`VIRTUAL_ENV`, `CONDA_PREFIX`), then `python3`, `python` (Linux/macOS) or `python`, `py`, `python3` (Windows; `py` is the python.org launcher, present even when Python is not on PATH).
+- Interpreters older than 3.9 are rejected with a message.
+- On Windows the Microsoft Store Python (`...\WindowsApps\...`) is only used if nothing else is installed: it redirects writes under AppData to a private folder, so the venv it creates is invisible to the app. If that happens the conversion stops with a message pointing to python.org.
 - Managed converter env location: `<user-data>/.stviz_venv` (auto-created and dependency-installed on first conversion/export-fallback run).
+- Every Python subprocess gets `PYTHONUTF8=1` and `PYTHONIOENCODING=utf-8`, so paths with non-ASCII characters print correctly on Windows (whose pipes otherwise use the legacy code page).
 
 Environment variables:
 - `STVIZ_FFMPEG`: override ffmpeg path.
@@ -304,9 +307,23 @@ Workspaces (`src/app/workspace.rs`):
 - The dataset is looked up at the saved path, then next to the workspace file by file name.
 - Opening validates the dataset and every referenced space/field before changing the current session.
 
+Subprocesses (`src/app/process.rs`):
+- `run_cancellable` (captured output) and `run_streaming` (line by line) poll the child and stop it when the job's cancel flag is set.
+- Cancel kills the whole process tree (`kill_tree`): on Linux/macOS each child runs in its own process group, which is killed as a group; on Windows `taskkill /T /F` is used. This matters on Windows, where a venv's `python.exe` is a launcher that runs the real interpreter as a child, and for pip, which starts its own children. After a cancel the output pipes are not waited on, so a surviving process can't hang the app.
+- All subprocesses are started with `CREATE_NO_WINDOW` on Windows, so no console windows flash up.
+
+Windows notes:
+- File locking: a loaded `.stviz` is memory-mapped, and Windows cannot replace or delete a mapped file. Before a conversion overwrites the loaded dataset, or a previous mock dataset is deleted, the app closes it (`release_dataset_file`); on exit the dataset is released before mock files are cleaned up. If the file is open in another stviz-animate window, the converter reports that instead of failing with a raw permission error.
+- File names: export and screenshot names are sanitised (`sanitize_file_name`): characters Windows forbids (`<>:"/\|?*`) become `_`, trailing dots/spaces are dropped and reserved names such as `CON` or `NUL` are prefixed.
+- ffmpeg: after an install through winget or Chocolatey the new PATH only reaches newly started programs, so `resolve_ffmpeg_path` also looks in `%LOCALAPPDATA%\Microsoft\WinGet\Links`, the winget package folder and `%ChocolateyInstall%\bin`.
+- Paths from `canonicalize` lose their `\\?\` prefix before being shown or stored (`display_path`).
+- CI runs the Rust tests and the converter tests on Windows, plus `windows-end-to-end`: the ignored end-to-end test, which finds Python, creates the managed venv, installs dependencies, generates a mock dataset, converts and loads it.
+
 ## Troubleshooting
 - ffmpeg missing: ensure `ffmpeg` is on PATH or bundle it.
-- Python missing: install Python 3.9+ and add to PATH.
+- Python missing: install Python 3.9+ and add to PATH (on Windows from python.org, not the Microsoft Store).
+- Windows, dependency install fails with long-path errors: enable long paths (`LongPathsEnabled`).
+- Windows, "Could not replace ...": the `.stviz` is open in another stviz-animate window.
 - Conversion failures: the status line shows the converter's reason; the Conversion log has the details.
 - Workspace cannot find its dataset: put the `.stviz` next to the workspace file.
 - Export artifacts: verify PNG frames to isolate encoding artifacts.

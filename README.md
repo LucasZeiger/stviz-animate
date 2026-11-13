@@ -17,12 +17,14 @@ Download the latest build for your system from [GitHub Releases](https://github.
 
 ## Running release zips
 
-Windows:
+Windows (10 and 11):
 1) Download the `stviz-animate-windows.zip` from GitHub Releases.
-2) Extract it.
-3) Run `stviz-animate.exe`.
+2) Right-click the zip, choose **Extract All...**, and extract it to a normal folder such as `Documents\stviz-animate`. Don't run it from inside the zip: the converter scripts in the `python` folder next to the `.exe` are needed.
+3) Run `stviz-animate.exe`. The build is not signed, so Windows SmartScreen may say "Windows protected your PC": click **More info**, then **Run anyway**.
+4) To convert `.h5ad` files, install Python 3.9 or newer from [python.org](https://www.python.org/downloads/windows/) and tick **Add python.exe to PATH** in the installer. The Microsoft Store version of Python does not work with the converter. The first conversion then sets up its own Python environment, which needs internet once and takes a few minutes.
+5) For video export, install ffmpeg once, e.g. in a terminal: `winget install Gyan.FFmpeg` (or use **Install ffmpeg now** in the Output panel). Without it, the app falls back to a slower OpenCV encoder.
 
-Ignore the trusted developer warning message if it shows up.
+Tip: to open `.stviz` files by double-click, right-click one, choose **Open with** > **Choose another app**, and pick `stviz-animate.exe`.
 
 macOS (Apple Silicon):
 1) Download `stviz-animate-mac.zip` from GitHub Releases and unzip it.
@@ -41,7 +43,7 @@ Linux (Ubuntu):
 
 ### Building it on Windows
 
-1) Install Rust (stable) and Visual Studio Build Tools.
+1) Install Rust (stable) from [rustup.rs](https://rustup.rs) and the Visual Studio Build Tools with the **Desktop development with C++** workload.
 2) Run:
 
 ```powershell
@@ -117,6 +119,15 @@ Requires Python 3.9+ (Python 3.10+ recommended).
 - `ffmpeg` is preferred if available on the user system. If missing, OpenCV fallback is auto-installed in the managed converter venv on first use.
 - If `ffmpeg` is missing, the Output panel offers an opt-in install via the system package manager (winget/choco, brew, or apt/dnf/pacman/zypper). It is off by default; internet access and possibly admin rights are required.
 - Encoding, the OpenCV fallback and the ffmpeg install run in the background, so the app stays responsive and **Cancel export** stops them.
+
+## Troubleshooting
+- **"Python not found"**: install Python 3.9+ from python.org (on Windows, tick **Add python.exe to PATH**), then restart the app. On Windows the app also finds Python through the `py` launcher.
+- **Conversion fails while installing dependencies**: the first conversion needs internet. Behind a proxy or firewall, install the packages yourself: `python -m pip install -r python/requirements.txt` and start the app from that environment (it prefers an active venv or conda env).
+- **Windows: "path too long" errors during setup**: enable long paths (Windows Settings > System > For developers > *Enable long paths*, or the `LongPathsEnabled` policy) and convert again.
+- **Windows: "Could not replace ... it is open in another program"**: the `.stviz` is open in another stviz-animate window. Close it there and convert again.
+- **Windows: conversion or export is blocked or very slow**: some antivirus tools scan every file the converter writes. Adding the user-data folder (`%APPDATA%\stviz-animate`) to the exclusions helps.
+- **Video export uses OpenCV instead of ffmpeg**: install ffmpeg (`winget install Gyan.FFmpeg` on Windows, `brew install ffmpeg` on macOS, `sudo apt install ffmpeg` on Ubuntu). The app finds winget and Chocolatey installs without a restart.
+- **Start over**: close the app and delete the user-data folder (see *Data conversion* for its location). Converted files, logs, settings and the managed Python environment are all inside it.
 
 ## Making a release
 1) Set `version` in `Cargo.toml` (e.g. `1.1.0`) and merge it to `main`.
