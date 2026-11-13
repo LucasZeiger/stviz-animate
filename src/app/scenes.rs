@@ -36,6 +36,8 @@ pub(super) struct SceneState {
     status: Option<String>,
     /// Index of the scene whose Delete button was pressed once.
     confirm_delete: Option<usize>,
+    /// Bumped whenever the list changes, so undo can notice.
+    version: u64,
 }
 
 impl SceneState {
@@ -52,6 +54,7 @@ impl SceneState {
         self.readable = raw.iter().map(|r| Scene::deserialize(r).is_ok()).collect();
         self.raw = raw;
         self.confirm_delete = None;
+        self.version = self.version.wrapping_add(1);
     }
 }
 
@@ -76,13 +79,23 @@ fn upsert(scenes: &[serde_json::Value], scene: serde_json::Value) -> Vec<serde_j
     out
 }
 
+impl SceneState {
+    pub(super) fn version(&self) -> u64 {
+        self.version
+    }
+
+    pub(super) fn raw(&self) -> &[serde_json::Value] {
+        &self.raw
+    }
+}
+
 impl StvizApp {
-    fn scenes_busy(&self) -> bool {
+    pub(super) fn scenes_busy(&self) -> bool {
         self.convert_running() || self.dataset_load.is_some() || self.export_busy()
     }
 
     /// Write `scenes` to the dataset's file; on success they become the list.
-    fn store_scenes(&mut self, scenes: Vec<serde_json::Value>) -> anyhow::Result<()> {
+    pub(super) fn store_scenes(&mut self, scenes: Vec<serde_json::Value>) -> anyhow::Result<()> {
         let (Some(ds), Some(path)) = (self.dataset.as_ref(), self.dataset_path.as_ref()) else {
             anyhow::bail!("no dataset loaded");
         };
@@ -124,6 +137,8 @@ impl StvizApp {
         };
         self.playing = false;
         self.apply_view(ds, &path, scene.view, false)?;
+        // Undoing this should bring the old camera back too.
+        self.history.note_view_jump();
         self.scenes.name_input = scene.name.clone();
         self.scenes.status = Some(format!("Loaded scene \"{}\".", scene.name));
         Ok(())

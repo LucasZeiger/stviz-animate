@@ -14,6 +14,8 @@ const WELCOME_RECENT: usize = 5;
 /// Shortcut list shown in the shortcuts window, as (keys, action).
 pub(super) const SHORTCUTS: &[(&str, &str)] = &[
     ("Space", "Play / pause"),
+    ("Ctrl/Cmd + Z", "Undo the last view change"),
+    ("Ctrl/Cmd + Shift + Z or Ctrl + Y", "Redo"),
     ("Right / Left arrow", "Step one frame forward / back"),
     ("Up / Down arrow", "Step ten frames forward / back"),
     ("Esc", "Close this list, or leave fullscreen"),
@@ -38,6 +40,30 @@ impl StvizApp {
         ui.horizontal(|ui| {
             ui.strong("stviz-animate");
             ui.weak(concat!("v", env!("CARGO_PKG_VERSION")));
+            ui.separator();
+            let mod_key = if cfg!(target_os = "macos") {
+                "Cmd"
+            } else {
+                "Ctrl"
+            };
+            if ui
+                .add_enabled(self.history.can_undo(), egui::Button::new("Undo"))
+                .on_hover_text(format!(
+                    "Undo the last change to colours, filters, keyframes, labels, \
+                     points, selection or scenes ({mod_key}+Z). Panning and zooming \
+                     are not undone."
+                ))
+                .clicked()
+            {
+                self.history.request_undo();
+            }
+            if ui
+                .add_enabled(self.history.can_redo(), egui::Button::new("Redo"))
+                .on_hover_text(format!("Redo what was undone ({mod_key}+Shift+Z)."))
+                .clicked()
+            {
+                self.history.request_redo();
+            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
                     .button("Shortcuts (?)")
