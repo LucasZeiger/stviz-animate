@@ -17,6 +17,7 @@ mod advanced;
 mod convert;
 mod dataset;
 mod env;
+pub(crate) use env::extend_macos_path;
 mod export;
 mod export_job;
 mod fit_text;

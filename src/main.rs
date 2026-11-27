@@ -39,6 +39,7 @@ fn with_large_buffer_limits(base: DeviceDescriptorFn) -> DeviceDescriptorFn {
 }
 
 fn main() -> eframe::Result<()> {
+    app::extend_macos_path();
     let mut viewport = eframe::egui::ViewportBuilder::default()
         .with_title("stviz-animate")
         .with_inner_size([1200.0, 800.0]);

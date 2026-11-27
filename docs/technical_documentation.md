@@ -366,8 +366,13 @@ Windows notes:
 - Paths from `canonicalize` lose their `\\?\` prefix before being shown or stored (`display_path`).
 - CI runs the Rust tests and the converter tests on Windows, plus `windows-end-to-end`: the ignored end-to-end test, which finds Python, creates the managed venv, installs dependencies, generates a mock dataset, converts and loads it.
 
+macOS notes:
+- An app started from Finder or the Dock only gets `/usr/bin:/bin:/usr/sbin:/sbin` as PATH, so Homebrew and python.org installs would be invisible and `python3` would hit Apple's Xcode command line tools stub. At startup `extend_macos_path` puts `/opt/homebrew/bin`, `/usr/local/bin` and `/Library/Frameworks/Python.framework/Versions/Current/bin` in front of PATH (only those that exist and are not already on it), so `python3`, `ffmpeg` and `brew` are found the same way as from a terminal.
+- The release bundle is built on Apple Silicon (`macos-latest`) and is not signed with a Developer ID, so Gatekeeper blocks the first launch (see Troubleshooting).
+
 ## Troubleshooting
-- "Python is needed": on Windows click **Install Python**. If that fails (no internet, or installs blocked by policy), install Python 3.9+ from python.org yourself; the Microsoft Store version does not work. On Linux/macOS install Python 3.9+ with the system package manager, then restart the app.
+- macOS, "stviz-animate can't be opened" or "is damaged": the build is not signed. Open **System Settings > Privacy & Security**, scroll down and click **Open Anyway** (on macOS 14 and older, right-click the app and choose **Open** also works). Or run `xattr -dr com.apple.quarantine /path/to/stviz-animate.app` once.
+- "Python is needed": on Windows click **Install Python**. If that fails (no internet, or installs blocked by policy), install Python 3.9+ from python.org yourself; the Microsoft Store version does not work. On macOS install it with `brew install python` or from python.org; on Linux with the system package manager (`sudo apt install python3 python3-venv`). Then restart the app.
 - Converter setup fails: the first conversion needs internet. Behind a proxy or firewall, install the packages yourself (`python -m pip install -r python/requirements.txt`) and start the app from that environment; it prefers an active venv or conda env. The Conversion log has the pip output.
 - Windows, "path too long" during setup: enable long paths (Settings > System > For developers > *Enable long paths*, or the `LongPathsEnabled` policy) and convert again.
 - Windows, "Could not replace ... it is open in another program": the `.stviz` is open in another stviz-animate window. Close it there and convert again.

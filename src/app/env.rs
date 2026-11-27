@@ -57,7 +57,7 @@ impl StvizApp {
             "Use Install Python below, or install Python 3.9 or newer from python.org."
         } else {
             "Install Python 3.9 or newer (e.g. `sudo apt install python3 python3-venv`, or \
-             python.org on macOS), then restart the app."
+             `brew install python` / python.org on macOS), then restart the app."
         };
         if errors.is_empty() {
             Err(format!("Python not found.\n{hint}"))
@@ -402,6 +402,43 @@ impl StvizApp {
     }
 }
 
+/// Folders where Homebrew and the python.org installer put `python3`,
+/// `ffmpeg` and `brew` on macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MACOS_TOOL_DIRS: &[&str] = &[
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/Library/Frameworks/Python.framework/Versions/Current/bin",
+];
+
+/// An app started from Finder or the Dock gets only `/usr/bin:/bin:/usr/sbin:/sbin`
+/// as PATH, so Python, ffmpeg and Homebrew installed the usual ways are not
+/// found, and `python3` hits Apple's stub that asks to install the Xcode
+/// command line tools. Put the usual install folders in front, once at startup.
+pub(crate) fn extend_macos_path() {
+    #[cfg(target_os = "macos")]
+    {
+        let old = std::env::var("PATH").unwrap_or_default();
+        let new = path_with_dirs_first(&old, MACOS_TOOL_DIRS, |d| Path::new(d).is_dir());
+        if new != old {
+            std::env::set_var("PATH", new);
+        }
+    }
+}
+
+/// `path` with each existing dir in `dirs` (that `path` lacks) put in front.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn path_with_dirs_first(path: &str, dirs: &[&str], exists: impl Fn(&str) -> bool) -> String {
+    let present: Vec<&str> = path.split(':').filter(|p| !p.is_empty()).collect();
+    let mut parts: Vec<&str> = dirs
+        .iter()
+        .copied()
+        .filter(|d| !present.contains(d) && exists(d))
+        .collect();
+    parts.extend(present);
+    parts.join(":")
+}
+
 /// Where python.org installers put Python on Windows, newest version first:
 /// per-user (`%LOCALAPPDATA%\Programs\Python\Python3XY`), then all-users
 /// (`%ProgramFiles%\Python3XY`).
@@ -503,8 +540,30 @@ const MIN_PYTHON_VERSION: (u32, u32) = (3, 9);
 
 #[cfg(test)]
 mod tests {
-    use super::{display_path, is_store_python, sanitize_file_name, windows_python_locations};
+    use super::{
+        display_path, is_store_python, path_with_dirs_first, sanitize_file_name,
+        windows_python_locations,
+    };
     use std::path::Path;
+
+    #[test]
+    fn finder_path_gains_homebrew_and_python_org_folders() {
+        let dirs = ["/opt/homebrew/bin", "/usr/local/bin", "/missing"];
+        let exists = |d: &str| d != "/missing";
+        assert_eq!(
+            path_with_dirs_first("/usr/bin:/bin:/usr/sbin:/sbin", &dirs, exists),
+            "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+        );
+        // A terminal PATH that already has them keeps its own order.
+        assert_eq!(
+            path_with_dirs_first("/usr/local/bin:/usr/bin:/opt/homebrew/bin", &dirs, exists),
+            "/usr/local/bin:/usr/bin:/opt/homebrew/bin"
+        );
+        assert_eq!(
+            path_with_dirs_first("", &dirs, exists),
+            "/opt/homebrew/bin:/usr/local/bin"
+        );
+    }
 
     #[test]
     fn python_install_folders_are_found_newest_first() {
