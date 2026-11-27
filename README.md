@@ -25,8 +25,11 @@ Windows:
 To convert `.h5ad` files, Python 3.9 or newer needs to be installed ([python.org](https://www.python.org/downloads/)). On Windows, if it isn't, the app shows an **Install Python** button that installs it for you. Everything else is set up automatically the first time.
 
 macOS (Apple Silicon):
-1) Download `stviz-animate-mac.zip` from GitHub Releases and unzip it.
-2) Right-click `stviz-animate.app` and choose **Open** the first time (the build is not signed).
+1) Download `stviz-animate-mac.zip` from GitHub Releases and unzip it (double-click). Move `stviz-animate.app` to **Applications** if you like.
+2) Double-click it. The build is not signed, so macOS blocks it the first time: open **System Settings > Privacy & Security**, scroll down and click **Open Anyway**. (On macOS 14 and older, right-click the app and choose **Open** instead.) If macOS says the app "is damaged", run `xattr -dr com.apple.quarantine /Applications/stviz-animate.app` in Terminal once.
+3) To convert `.h5ad` files, install Python 3.9 or newer: `brew install python` or the installer from [python.org](https://www.python.org/downloads/macos/). For faster video export, optionally `brew install ffmpeg`.
+
+The release is built for Apple Silicon (M1 and later). On an Intel Mac, build it from source (below).
 
 Linux (Ubuntu):
 1) Download the `stviz-animate-ubuntu.tar.gz` from GitHub Releases.
@@ -49,14 +52,14 @@ cargo run --release
 ```
 
 ### macOS
-1) Install Rust (stable).
+1) Install the Xcode command line tools (`xcode-select --install`) and Rust (stable) from [rustup.rs](https://rustup.rs).
 2) Run:
 
 ```bash
 cargo run --release
 ```
 
-Note: without an Apple Developer ID, distributed macOS builds must be opened via right-click -> Open the first time.
+Note: without an Apple Developer ID, distributed macOS builds must be allowed once under System Settings > Privacy & Security > Open Anyway.
 
 ### Linux (Ubuntu/Debian)
 1) Install Rust (stable) and GTK dev libs for file dialogs.
